@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+
+# Secrets — never commit API keys or SMTP credentials
+.env
+server/.env
+
+# Runtime data
+server/users.json
+server/agent_workspace/
+*.log
+
+# Local tooling
+.claude/
+.DS_Store

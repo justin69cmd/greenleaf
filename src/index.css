@@ -1,0 +1,353 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,500;1,600;1,700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Elegant serif for classy headings. */
+.font-classy {
+  font-family: 'Playfair Display', Georgia, 'Times New Roman', serif;
+}
+
+/* Circular navigation entrance (CSS-driven so it always plays). */
+@keyframes menu-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes menu-scale {
+  from {
+    opacity: 0;
+    transform: scale(0);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.menu-overlay {
+  animation: menu-fade 0.3s ease both;
+}
+.menu-circle {
+  animation: menu-scale 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Dark team profile card with an emerald border glow. */
+.profile-card {
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  box-shadow: 0 0 18px rgba(16, 185, 129, 0.25), 0 0 44px rgba(16, 185, 129, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Circular social buttons that glow in their brand color on hover.
+   The glow color is passed per-button via the --glow custom property. */
+.social-btn {
+  transition: box-shadow 0.25s ease, transform 0.25s ease, background-color 0.25s ease;
+}
+.social-btn:hover {
+  transform: scale(1.12);
+  background-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 14px var(--glow), 0 0 30px var(--glow);
+}
+
+/* AI model reveal: zoom out into a gently floating emerald. */
+@keyframes ai-zoom-out {
+  from {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.ai-zoom {
+  animation: ai-zoom-out 1.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes float-emerald {
+  0%,
+  100% {
+    transform: translateY(-9px);
+  }
+  50% {
+    transform: translateY(9px);
+  }
+}
+.float-emerald {
+  animation: float-emerald 4s ease-in-out infinite;
+}
+@keyframes ai-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.ai-fade-up {
+  animation: ai-fade-up 0.8s ease both;
+  animation-delay: 1s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-zoom,
+  .float-emerald,
+  .ai-fade-up {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* Shimmering status text while the agent team works. */
+@keyframes status-shimmer {
+  to {
+    background-position: -200% center;
+  }
+}
+.status-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(167, 243, 208, 0.45) 0%,
+    #6ee7b7 40%,
+    #ecfdf5 50%,
+    #6ee7b7 60%,
+    rgba(167, 243, 208, 0.45) 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: status-shimmer 1.8s linear infinite;
+}
+
+/* Pulsing dot next to the task currently being executed. */
+@keyframes task-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.85);
+    box-shadow: 0 0 0 rgba(52, 211, 153, 0);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+    box-shadow: 0 0 8px rgba(52, 211, 153, 0.8);
+  }
+}
+.task-dot-running {
+  animation: task-pulse 1s ease-in-out infinite;
+}
+
+/* Mic button while listening — soft breathing glow. */
+@keyframes mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(52, 211, 153, 0);
+  }
+}
+.mic-live {
+  animation: mic-pulse 1.4s ease-out infinite;
+}
+
+/* Answer paragraphs cascade in one after another. */
+@keyframes block-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.block-reveal {
+  animation: block-reveal 0.5s ease both;
+}
+
+/* Chat cards slide in as they appear. */
+@keyframes answer-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.answer-reveal {
+  animation: answer-reveal 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-shimmer,
+  .task-dot-running,
+  .answer-reveal,
+  .block-reveal,
+  .mic-live {
+    animation: none;
+  }
+  .status-shimmer {
+    color: #a7f3d0;
+    -webkit-text-fill-color: #a7f3d0;
+  }
+}
+
+/* Gently pulsing leaf used as the "thinking" indicator in the AI chat. */
+@keyframes leaf-pulse {
+  0%,
+  100% {
+    transform: scale(1) rotate(-6deg);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.18) rotate(6deg);
+    opacity: 1;
+  }
+}
+.leaf-pulse {
+  display: inline-block;
+  animation: leaf-pulse 1.1s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .leaf-pulse {
+    animation: none;
+  }
+}
+
+/* Spinner shown while the Spline 3D scene loads (SplineScene fallback). */
+.loader {
+  width: 42px;
+  height: 42px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-bottom-color: #ffffff;
+  border-radius: 50%;
+  display: inline-block;
+  box-sizing: border-box;
+  animation: loader-rotation 1s linear infinite;
+}
+@keyframes loader-rotation {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Pulsing emerald glow for the glass CTA's border. */
+@keyframes border-glow {
+  0%,
+  100% {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 10px rgba(16, 185, 129, 0.45),
+      0 0 22px rgba(16, 185, 129, 0.25);
+  }
+  50% {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 17px rgba(16, 185, 129, 0.75),
+      0 0 36px rgba(16, 185, 129, 0.45);
+  }
+}
+.glow-border {
+  animation: border-glow 2.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .glow-border {
+    animation: none;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 14px rgba(16, 185, 129, 0.6);
+  }
+}
+
+.liquid-glass {
+  background: rgba(255, 255, 255, 0.01);
+  background-blend-mode: luminosity;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  border: none;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  position: relative;
+  overflow: hidden;
+}
+
+.liquid-glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.4px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.45) 0%,
+    rgba(255, 255, 255, 0.15) 20%,
+    rgba(255, 255, 255, 0) 40%,
+    rgba(255, 255, 255, 0) 60%,
+    rgba(255, 255, 255, 0.15) 80%,
+    rgba(255, 255, 255, 0.45) 100%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ── Animated gradient border (BorderRotate) ─────────────────────────────────
+   The conic gradient rotates by animating the custom property --gradient-angle.
+   A CSS custom property can only animate if it's registered with @property,
+   so this block is required for the rotation to work. */
+@property --gradient-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes gradient-rotate {
+  to {
+    --gradient-angle: 360deg;
+  }
+}
+
+.gradient-border-auto {
+  animation: gradient-rotate var(--animation-duration, 5s) linear infinite;
+}
+.gradient-border-hover:hover {
+  animation: gradient-rotate var(--animation-duration, 5s) linear infinite;
+}
+.gradient-border-stop-hover {
+  animation: gradient-rotate var(--animation-duration, 5s) linear infinite;
+}
+.gradient-border-stop-hover:hover {
+  animation-play-state: paused;
+}
+
+/* ── Animated gradient headline ──────────────────────────────────────────── */
+@keyframes headline-sweep {
+  to {
+    background-position: 200% center;
+  }
+}
+.headline-gradient {
+  background: linear-gradient(90deg, #ffffff 0%, #e9d5ff 25%, #c084fc 50%, #e9d5ff 75%, #ffffff 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: headline-sweep 6s linear infinite;
+}
+
+/* ── Purple focus rings across interactive elements (keyboard only) ───────── */
+:where(button, a, input, textarea, select):focus-visible {
+  outline: 2px solid rgba(168, 85, 247, 0.65);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .headline-gradient {
+    animation: none;
+  }
+}
