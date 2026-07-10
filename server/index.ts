@@ -42,7 +42,23 @@ app.get('/files/*', (req, res) => {
 })
 
 // ── Auth routes ─────────────────────────────────────────────────────────────
-app.post('/auth/signup', (req, res) => {
+// In-memory rate limit: 10 auth attempts per IP per 5 minutes. Enough for a
+// human who typoed a password; a wall for credential-stuffing scripts.
+const authHits = new Map<string, number[]>()
+function authLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const ip = req.ip ?? 'unknown'
+  const now = Date.now()
+  const hits = (authHits.get(ip) ?? []).filter((t) => now - t < 5 * 60_000)
+  if (hits.length >= 10) {
+    res.status(429).json({ error: 'Too many attempts — please wait a few minutes and try again.' })
+    return
+  }
+  hits.push(now)
+  authHits.set(ip, hits)
+  next()
+}
+
+app.post('/auth/signup', authLimiter, (req, res) => {
   try {
     const { name, email, password } = req.body ?? {}
     res.json(signup(name, email, password))
@@ -51,7 +67,7 @@ app.post('/auth/signup', (req, res) => {
   }
 })
 
-app.post('/auth/login', (req, res) => {
+app.post('/auth/login', authLimiter, (req, res) => {
   try {
     const { email, password } = req.body ?? {}
     res.json(login(email, password))
@@ -73,7 +89,15 @@ interface Incoming {
   skipClarify?: boolean
 }
 
-wss.on('connection', (ws: WebSocket) => {
+wss.on('connection', (ws: WebSocket, req) => {
+  // Browsers send an Origin header — reject cross-site pages so a random
+  // website can't drive the agent. Non-browser clients (no Origin) pass,
+  // which keeps local tooling working.
+  const origin = req.headers.origin
+  if (origin && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    ws.close(1008, 'Origin not allowed')
+    return
+  }
   console.log('Client connected')
 
   const send = (msg: WSMessage) => {
