@@ -16,3 +16,6 @@ server/agent_workspace/
 # Local tooling
 .claude/
 .DS_Store
+
+# Word lock files
+~$*
