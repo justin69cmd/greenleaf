@@ -19,4 +19,6 @@ server/agent_workspace/
 
 # Word lock files
 ~$*
-report/GreenLeaf_source_code.zip
+
+# Reports (kept local, not published)
+report/
