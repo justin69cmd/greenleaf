@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+
+# When mounted under /blog, the authoritative robots.txt is the app's root
+# robots.txt. This file (served at /blog/robots.txt) is a harmless duplicate.
+Sitemap: https://greenleaf.vercel.app/blog/sitemap-index.xml

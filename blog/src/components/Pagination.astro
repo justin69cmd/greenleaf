@@ -1,0 +1,17 @@
+---
+// Works with Astro's paginate() `page` object.
+interface Props {
+  page: {
+    url: { prev?: string; next?: string }
+    currentPage: number
+    lastPage: number
+  }
+  label?: string
+}
+const { page, label = 'Part' } = Astro.props
+---
+<nav class="pagination" aria-label="Pagination">
+  {page.url.prev ? <a href={page.url.prev} rel="prev">← Newer</a> : <span class="disabled">← Newer</span>}
+  <span class="pages">{label} {page.currentPage} of {page.lastPage}</span>
+  {page.url.next ? <a href={page.url.next} rel="next">Older →</a> : <span class="disabled">Older →</span>}
+</nav>

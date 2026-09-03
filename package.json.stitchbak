@@ -6,8 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview",
-    "build:site": "npm run build && (cd blog && npm install && npm run build) && rm -rf dist/blog && cp -r blog/dist dist/blog"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.35",

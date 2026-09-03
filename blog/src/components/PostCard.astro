@@ -1,0 +1,30 @@
+---
+import type { Post } from '../utils'
+import { heroSrc, formatDate } from '../utils'
+import { slugifyCategory } from '../consts'
+import { withBase, assetUrl } from '../base'
+
+interface Props { post: Post }
+const { post } = Astro.props
+const { title, description, pubDate, category, heroImage, heroAlt, readingTime } = post.data
+const img = assetUrl(heroSrc(heroImage))
+const href = withBase(`/${post.id}/`)
+---
+<article class="card">
+  <a href={href} class="card-link" aria-label={title}>
+    {img ? (
+      <img class="thumb" src={img} alt={heroAlt || title} loading="lazy" decoding="async" width="640" height="360" />
+    ) : (
+      <div class="thumb" aria-hidden="true"></div>
+    )}
+  </a>
+  <div class="body">
+    <a href={withBase(`/categories/${slugifyCategory(category)}/`)} style="align-self:flex-start;"><span class="chip">{category}</span></a>
+    <a href={href} class="card-link"><h3>{title}</h3></a>
+    <p class="excerpt">{description}</p>
+    <div class="meta">
+      <time datetime={pubDate.toISOString()}>{formatDate(pubDate)}</time>
+      {readingTime && <span>· {readingTime} min read</span>}
+    </div>
+  </div>
+</article>

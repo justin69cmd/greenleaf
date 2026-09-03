@@ -1,0 +1,30 @@
+---
+import { SITE_TITLE, CATEGORIES, slugifyCategory } from '../consts'
+import { withBase } from '../base'
+const year = new Date().getFullYear()
+---
+<footer class="site-footer">
+  <div class="container">
+    <div style="display:flex;flex-wrap:wrap;gap:2rem;justify-content:space-between;">
+      <div style="max-width:22rem;">
+        <div class="brand" style="margin-bottom:.5rem;"><span class="leaf">🍃</span> {SITE_TITLE}</div>
+        <p style="margin:0;">Part of the GreenLeaf wellness project. Articles are written to be practical and are linked to their sources.</p>
+      </div>
+      <div>
+        <strong style="display:block;margin-bottom:.5rem;color:var(--text-soft);">Explore</strong>
+        <div style="display:flex;flex-direction:column;gap:.35rem;">
+          {CATEGORIES.map((c) => <a href={withBase(`/categories/${slugifyCategory(c)}/`)}>{c}</a>)}
+        </div>
+      </div>
+      <div>
+        <strong style="display:block;margin-bottom:.5rem;color:var(--text-soft);">Site</strong>
+        <div style="display:flex;flex-direction:column;gap:.35rem;">
+          <a href={withBase('/articles/')}>All articles</a>
+          <a href="/">← Back to app</a>
+          <a href={withBase('/rss.xml')}>RSS feed</a>
+        </div>
+      </div>
+    </div>
+    <p style="margin-top:2rem;">© {year} {SITE_TITLE}. Content is informational and not medical advice.</p>
+  </div>
+</footer>

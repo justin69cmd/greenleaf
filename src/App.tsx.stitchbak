@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Home, FileText, Users, Search, Settings, Menu, BookOpen } from 'lucide-react'
+import { Home, FileText, Users, Search, Settings, Menu } from 'lucide-react'
 import { SplineScene } from '@/components/ui/splite'
 import { Card } from '@/components/ui/card'
 import { Spotlight } from '@/components/ui/spotlight'
@@ -21,7 +21,6 @@ function loadUser(): AuthUser | null {
 const navItems = [
   { name: 'Home', icon: Home, href: '#' },
   { name: 'News', icon: FileText, href: '#' },
-  { name: 'Journal', icon: BookOpen, href: '/blog/' },
   { name: 'Team', icon: Users, href: '#' },
   { name: 'Search', icon: Search, href: '#' },
   { name: 'Settings', icon: Settings, href: '#' },
@@ -42,9 +41,6 @@ export default function App() {
     if (name === 'Team') setView('team')
     if (name === 'Home') setView('home')
     if (name === 'News') setView('news')
-    // The Journal (blog) is a separate Astro site mounted at /blog on the same
-    // domain, so we navigate to it rather than switching an in-app view.
-    if (name === 'Journal') window.location.href = '/blog/'
     if (name === 'Settings') setShowSettings(true)
   }
 
@@ -92,21 +88,13 @@ export default function App() {
               scattered to-dos into a calm, organized routine — so you spend less time managing your
               list and more time living it.
             </p>
-            <div className="mt-6 flex items-center gap-3">
-              <button
-                onClick={handleGetStarted}
-                className="glow-border inline-flex w-fit items-center gap-2 rounded-full border border-emerald-300/60 bg-emerald-400/15 px-5 py-2.5 text-sm font-medium text-emerald-50 backdrop-blur-md transition-colors hover:border-emerald-200/90 hover:bg-emerald-400/25"
-              >
-                Get started
-                <span aria-hidden>→</span>
-              </button>
-              <a
-                href="/blog/"
-                className="inline-flex w-fit items-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-medium text-neutral-200 backdrop-blur-md transition-colors hover:border-white/30 hover:bg-white/10"
-              >
-                Read the Journal
-              </a>
-            </div>
+            <button
+              onClick={handleGetStarted}
+              className="glow-border mt-6 inline-flex w-fit items-center gap-2 rounded-full border border-emerald-300/60 bg-emerald-400/15 px-5 py-2.5 text-sm font-medium text-emerald-50 backdrop-blur-md transition-colors hover:border-emerald-200/90 hover:bg-emerald-400/25"
+            >
+              Get started
+              <span aria-hidden>→</span>
+            </button>
           </div>
 
           {/* Right content */}

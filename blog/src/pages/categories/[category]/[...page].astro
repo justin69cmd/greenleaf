@@ -1,0 +1,54 @@
+---
+import { getCollection } from 'astro:content'
+import BaseLayout from '../../../layouts/BaseLayout.astro'
+import PostCard from '../../../components/PostCard.astro'
+import Pagination from '../../../components/Pagination.astro'
+import { PAGE_SIZE, CATEGORIES, slugifyCategory } from '../../../consts'
+import { sortPosts } from '../../../utils'
+import { withBase } from '../../../base'
+import type { GetStaticPathsOptions } from 'astro'
+
+export async function getStaticPaths({ paginate }: GetStaticPathsOptions) {
+  const all = sortPosts(await getCollection('blog'))
+  // Include every configured category plus any category found on a post,
+  // so a generated post with a new category still gets its own section.
+  const found = new Set<string>([...CATEGORIES, ...all.map((p) => p.data.category)])
+
+  return [...found].flatMap((category) => {
+    const posts = all.filter((p) => p.data.category === category)
+    return paginate(posts, {
+      params: { category: slugifyCategory(category) },
+      props: { categoryName: category },
+      pageSize: PAGE_SIZE,
+    })
+  })
+}
+
+const { page, categoryName } = Astro.props
+---
+<BaseLayout
+  title={page.currentPage > 1 ? `${categoryName} · Part ${page.currentPage}` : String(categoryName)}
+  description={`${categoryName} articles from the GreenLeaf Journal — practical, referenced wellness writing.`}
+>
+  <div class="container">
+    <div class="hero" style="padding-bottom:1rem;">
+      <h1>{categoryName}</h1>
+      <p>{page.total} article{page.total === 1 ? '' : 's'} in this part of the Journal.</p>
+      <div class="rail">
+        {CATEGORIES.map((c) => (
+          <a href={withBase(`/categories/${slugifyCategory(c)}/`)} aria-current={c === categoryName ? 'true' : undefined}>{c}</a>
+        ))}
+      </div>
+    </div>
+
+    {page.data.length > 0 ? (
+      <div class="grid">
+        {page.data.map((post) => <PostCard post={post} />)}
+      </div>
+    ) : (
+      <p style="text-align:center;color:var(--text-faint);padding:3rem 0;">No articles here yet — check back soon.</p>
+    )}
+
+    {page.lastPage > 1 && <Pagination page={page} label="Part" />}
+  </div>
+</BaseLayout>

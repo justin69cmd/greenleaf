@@ -1,0 +1,38 @@
+---
+import { getCollection } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import PostCard from '../../components/PostCard.astro'
+import Pagination from '../../components/Pagination.astro'
+import { PAGE_SIZE, CATEGORIES, slugifyCategory } from '../../consts'
+import { sortPosts } from '../../utils'
+import { withBase } from '../../base'
+import type { GetStaticPathsOptions } from 'astro'
+
+export async function getStaticPaths({ paginate }: GetStaticPathsOptions) {
+  const posts = sortPosts(await getCollection('blog'))
+  // paginate() emits /articles/ (part 1), /articles/2/, /articles/3/ ...
+  return paginate(posts, { pageSize: PAGE_SIZE })
+}
+
+const { page } = Astro.props
+---
+<BaseLayout
+  title={page.currentPage > 1 ? `All articles · Part ${page.currentPage}` : 'All articles'}
+  description="Every article in the GreenLeaf Journal — practical, referenced writing on wellness and living well."
+>
+  <div class="container">
+    <div class="hero" style="padding-bottom:1rem;">
+      <h1>All articles</h1>
+      <p>Browse the full library — {page.total} articles and growing.</p>
+      <div class="rail">
+        {CATEGORIES.map((c) => <a href={withBase(`/categories/${slugifyCategory(c)}/`)}>{c}</a>)}
+      </div>
+    </div>
+
+    <div class="grid">
+      {page.data.map((post) => <PostCard post={post} />)}
+    </div>
+
+    <Pagination page={page} label="Part" />
+  </div>
+</BaseLayout>

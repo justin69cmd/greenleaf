@@ -1,0 +1,18 @@
+---
+interface Ref { title: string; url: string; publisher?: string }
+interface Props { references: Ref[] }
+const { references } = Astro.props
+---
+{references.length > 0 && (
+  <section class="references" aria-label="References">
+    <h2>References &amp; further reading</h2>
+    <ol>
+      {references.map((r) => (
+        <li>
+          <a href={r.url} target="_blank" rel="noopener nofollow">{r.title}</a>
+          {r.publisher && <span class="pub"> — {r.publisher}</span>}
+        </li>
+      ))}
+    </ol>
+  </section>
+)}

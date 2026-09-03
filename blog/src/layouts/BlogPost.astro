@@ -1,0 +1,79 @@
+---
+import BaseLayout from './BaseLayout.astro'
+import References from '../components/References.astro'
+import type { Post } from '../utils'
+import { heroSrc, formatDate } from '../utils'
+import { slugifyCategory } from '../consts'
+import { withBase, assetUrl } from '../base'
+
+interface Props { post: Post }
+const { post } = Astro.props
+const d = post.data
+const img = assetUrl(heroSrc(d.heroImage))
+
+// JSON-LD Article schema — helps Google understand and surface the post.
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'Article',
+  headline: d.title,
+  description: d.description,
+  datePublished: d.pubDate.toISOString(),
+  dateModified: (d.updatedDate ?? d.pubDate).toISOString(),
+  author: { '@type': 'Organization', name: d.author },
+  articleSection: d.category,
+  keywords: d.tags.join(', '),
+  ...(img ? { image: new URL(img, Astro.site).href } : {}),
+  ...(d.references.length
+    ? { citation: d.references.map((r) => ({ '@type': 'CreativeWork', name: r.title, url: r.url })) }
+    : {}),
+  mainEntityOfPage: { '@type': 'WebPage', '@id': new URL(Astro.url.pathname, Astro.site).href },
+}
+---
+<BaseLayout title={d.title} description={d.description} ogImage={img} ogType="article">
+  <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} slot="head" />
+
+  <article>
+    <div class="narrow article-header">
+      <a href={withBase(`/categories/${slugifyCategory(d.category)}/`)}><span class="chip">{d.category}</span></a>
+      <h1>{d.title}</h1>
+      <p class="dek">{d.description}</p>
+      <div class="article-meta">
+        <span>{d.author}</span>
+        <span>·</span>
+        <time datetime={d.pubDate.toISOString()}>{formatDate(d.pubDate)}</time>
+        {d.readingTime && <><span>·</span><span>{d.readingTime} min read</span></>}
+      </div>
+    </div>
+
+    {img && (
+      <div class="narrow">
+        <figure class="hero-figure">
+          <img src={img} alt={d.heroAlt || d.title} width="1200" height="675" fetchpriority="high" />
+          <figcaption>
+            {d.aiImage && <span class="ai-badge">AI-generated image</span>}
+            {d.imageCredit && (
+              <>
+                {' '}Photo by{' '}
+                <a href={d.imageCredit.link} target="_blank" rel="noopener nofollow">{d.imageCredit.author}</a>
+                {' '}on {d.imageCredit.source}
+              </>
+            )}
+          </figcaption>
+        </figure>
+      </div>
+    )}
+
+    <div class="narrow prose">
+      <slot />
+    </div>
+
+    <div class="narrow">
+      <References references={d.references} />
+      {d.tags.length > 0 && (
+        <div class="tagrow">
+          {d.tags.map((t) => <a href={withBase('/articles/')}>#{t}</a>)}
+        </div>
+      )}
+    </div>
+  </article>
+</BaseLayout>

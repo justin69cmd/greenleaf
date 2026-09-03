@@ -1,0 +1,14 @@
+---
+import { SITE_TITLE, CATEGORIES, slugifyCategory } from '../consts'
+import { withBase } from '../base'
+const top = CATEGORIES.slice(0, 4)
+---
+<header class="site-header">
+  <div class="container bar">
+    <a href={withBase('/')} class="brand"><span class="leaf">🍃</span> {SITE_TITLE}</a>
+    <nav class="nav" aria-label="Primary">
+      <a href={withBase('/articles/')}>All articles</a>
+      {top.map((c) => <a href={withBase(`/categories/${slugifyCategory(c)}/`)}>{c}</a>)}
+    </nav>
+  </div>
+</header>
