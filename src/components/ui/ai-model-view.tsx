@@ -3,8 +3,8 @@ import { X, Paperclip, ArrowUp, Mic, RotateCcw, FileText, Copy, Check } from 'lu
 
 const CHIPS = ['Plan my week', 'Set a goal', 'Daily routine', 'Brain dump']
 const FOLLOWUP_CHIPS = ['Refine this plan', 'Make it shorter', 'What should I do first?']
-const WS_URL = 'ws://greenleaf-backend.vercel.app/'
-const API = 'https://greenleaf-backend.vercel.app/'
+const WS_URL = 'ws://greenleaf-backend.vercel.app'
+const API = 'https://greenleaf-backend.vercel.app'
 const CHAT_KEY = 'greenleaf-chat'
 
 interface Msg {

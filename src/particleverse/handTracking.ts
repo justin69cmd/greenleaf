@@ -104,7 +104,7 @@ export class HandTracker {
     if (!window.isSecureContext) {
       throw new TrackerError(
         'insecure',
-        'Camera needs a secure context. Open the app via https://greenleaf-backend.vercel.app/ (or https), not a file:// path or a LAN IP.',
+        'Camera needs a secure context. Open the app via https://greenleaf-backend.vercel.app (or https), not a file:// path or a LAN IP.',
       )
     }
     if (!navigator.mediaDevices?.getUserMedia) {

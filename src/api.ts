@@ -1,4 +1,4 @@
-export const API_URL = 'https://greenleaf-backend.vercel.app/'
+export const API_URL = 'https://greenleaf-backend.vercel.app'
 
 export interface User {
   name: string
