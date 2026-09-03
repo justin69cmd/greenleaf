@@ -94,7 +94,10 @@ wss.on('connection', (ws: WebSocket, req) => {
   // website can't drive the agent. Non-browser clients (no Origin) pass,
   // which keeps local tooling working.
   const origin = req.headers.origin
-  if (origin && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+  if (
+    origin &&
+    !/^https:\/\/greenleaf-backend\.vercel\.app$/.test(origin)
+  ) {
     ws.close(1008, 'Origin not allowed')
     return
   }

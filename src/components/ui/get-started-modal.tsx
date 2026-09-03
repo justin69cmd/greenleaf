@@ -9,7 +9,7 @@ export interface AuthUser {
   token: string
 }
 
-const API = 'http://localhost:4000'
+const API = 'https://greenleaf-backend.vercel.app/'
 
 export default function GetStartedModal({
   onClose,

@@ -1,4 +1,4 @@
-export const API_URL = 'http://localhost:4000'
+export const API_URL = 'https://greenleaf-backend.vercel.app/'
 
 export interface User {
   name: string

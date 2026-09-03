@@ -56,7 +56,7 @@ export interface AgentState {
   history: ConversationTurn[]
 }
 
-const WS_URL = 'ws://localhost:4000'
+const WS_URL = 'ws://greenleaf-backend.vercel.app/'
 
 const initialState: AgentState = {
   status: 'idle',
