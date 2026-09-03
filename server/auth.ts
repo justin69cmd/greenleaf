@@ -19,7 +19,7 @@ export interface PublicUser {
   token: string
 }
 
-const USERS_FILE = path.resolve('./users.json')
+const USERS_FILE = path.join('/tmp', 'users.json')
 const sessions = new Map<string, string>() // token -> email
 
 function loadUsers(): Record<string, User> {
