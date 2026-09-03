@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Justin Robinson — Developer Portfolio</title>
+  <meta name="description" content="Justin Robinson — developer building AI agents, interactive 3D experiences, and modern web apps." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <div class="scroll-progress" aria-hidden="true"></div>
+
+  <header class="site-header" id="top">
+    <nav class="nav" aria-label="Primary">
+      <a class="nav-brand" href="#top">
+        <span class="brand-mark" aria-hidden="true"></span>
+        Justin Robinson
+      </a>
+      <button class="nav-toggle" aria-expanded="false" aria-controls="nav-menu" aria-label="Toggle navigation menu">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line class="bar-top" x1="4" y1="7" x2="20" y2="7"/>
+          <line class="bar-mid" x1="4" y1="12" x2="20" y2="12"/>
+          <line class="bar-bot" x1="4" y1="17" x2="20" y2="17"/>
+        </svg>
+      </button>
+      <ul class="nav-menu" id="nav-menu">
+        <li><a href="#work">Work</a></li>
+        <li><a href="#about">About</a></li>
+        <li><a href="#skills">Skills</a></li>
+        <li><a class="nav-cta" href="#contact">Contact</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main id="main">
+    <!-- ============ HERO ============ -->
+    <section class="hero">
+      <div class="hero-bg" aria-hidden="true">
+        <canvas class="ascii-canvas"></canvas>
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="grid-lines" data-depth="0.12"></div>
+        <div class="cube-wrap cube-pos-1">
+          <div class="cube" data-spin="0.05">
+            <span class="face"></span><span class="face"></span><span class="face"></span>
+            <span class="face"></span><span class="face"></span><span class="face"></span>
+          </div>
+        </div>
+        <div class="cube-wrap cube-pos-2">
+          <div class="cube" data-spin="0.09">
+            <span class="face"></span><span class="face"></span><span class="face"></span>
+            <span class="face"></span><span class="face"></span><span class="face"></span>
+          </div>
+        </div>
+      </div>
+      <div class="hero-inner">
+        <p class="hero-eyebrow reveal">Developer · AI &amp; Interactive Web</p>
+        <h1 class="hero-title reveal" style="--d:.08s">
+          I build <span class="accent">intelligent</span><br />
+          software that feels alive.
+        </h1>
+        <p class="hero-sub reveal" style="--d:.16s">
+          From multi-agent AI systems to gesture-controlled 3D worlds —
+          I turn ambitious ideas into fast, polished products.
+        </p>
+        <div class="hero-actions reveal" style="--d:.24s">
+          <a class="btn btn-primary" href="#work">
+            View my work
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </a>
+          <a class="btn btn-ghost" href="#contact">Get in touch</a>
+        </div>
+        <dl class="hero-stats reveal" style="--d:.32s">
+          <div><dt>3+</dt><dd>Major projects shipped</dd></div>
+          <div><dt>6</dt><dd>AI agents orchestrated</dd></div>
+          <div><dt>100%</dt><dd>Built end-to-end</dd></div>
+        </dl>
+      </div>
+      <a class="scroll-hint" href="#work" aria-label="Scroll to projects">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>
+      </a>
+    </section>
+
+    <!-- ============ WORK ============ -->
+    <section class="section" id="work">
+      <div class="section-head reveal">
+        <p class="section-eyebrow">Selected Work</p>
+        <h2>Projects I'm proud of</h2>
+      </div>
+
+      <div class="project-grid">
+        <article class="project-card card-lg" data-flow="up">
+          <div class="project-visual visual-equilibrium" aria-hidden="true">
+            <div class="node n1"></div><div class="node n2"></div><div class="node n3"></div>
+            <div class="node n4"></div><div class="node n5"></div>
+            <svg class="links" viewBox="0 0 400 240" preserveAspectRatio="none">
+              <line x1="200" y1="60" x2="90" y2="150"/><line x1="200" y1="60" x2="200" y2="170"/>
+              <line x1="200" y1="60" x2="310" y2="150"/><line x1="90" y1="150" x2="200" y2="170"/>
+              <line x1="310" y1="150" x2="200" y2="170"/>
+            </svg>
+          </div>
+          <div class="project-body">
+            <div class="project-tags">
+              <span class="tag">React</span><span class="tag">Express</span><span class="tag">WebSockets</span><span class="tag">LLM</span>
+            </div>
+            <h3>Equilibrium — Multi-Agent AI Swarm</h3>
+            <p>A human-in-the-loop AI platform where an orchestrator decomposes tasks across role-specialist agents with a critic feedback loop — streamed live over a persistent WebSocket, with plan approval and follow-up conversation built in.</p>
+            <span class="project-link">Case study <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg></span>
+          </div>
+        </article>
+
+        <article class="project-card" data-flow="left">
+          <div class="project-visual visual-particle" aria-hidden="true">
+            <span class="p"></span><span class="p"></span><span class="p"></span><span class="p"></span>
+            <span class="p"></span><span class="p"></span><span class="p"></span><span class="p"></span>
+            <span class="p"></span><span class="p"></span><span class="p"></span><span class="p"></span>
+          </div>
+          <div class="project-body">
+            <div class="project-tags">
+              <span class="tag">Three.js</span><span class="tag">MediaPipe</span>
+            </div>
+            <h3>ParticleVerse</h3>
+            <p>A gesture-controlled 3D particle universe — hand tracking via webcam drives tens of thousands of particles in real time.</p>
+            <span class="project-link">Case study <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg></span>
+          </div>
+        </article>
+
+        <article class="project-card" data-flow="right">
+          <div class="project-visual visual-greenleaf" aria-hidden="true">
+            <span class="leaf l1"></span><span class="leaf l2"></span><span class="leaf l3"></span>
+          </div>
+          <div class="project-body">
+            <div class="project-tags">
+              <span class="tag">Vite</span><span class="tag">Tailwind</span><span class="tag">Spline</span>
+            </div>
+            <h3>GreenLeaf</h3>
+            <p>An immersive product landing experience with a 3D Spline hero, circular navigation, and an animated swirl-of-leaves AI view behind login.</p>
+            <span class="project-link">Case study <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg></span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============ ABOUT ============ -->
+    <section class="section section-alt" id="about">
+      <div class="about-grid">
+        <div class="about-text" data-flow="left">
+          <p class="section-eyebrow">About</p>
+          <h2>Engineering with taste.</h2>
+          <p>I'm Justin — a developer who cares as much about how software <em>feels</em> as how it works. I build full-stack products end to end: designing the interface, architecting the backend, and wiring in AI where it genuinely helps.</p>
+          <p>Recently I've been deep in multi-agent LLM systems — orchestration, critic loops, and human-in-the-loop workflows — and creative frontend work with real-time 3D and computer vision.</p>
+          <a class="btn btn-ghost" href="#contact">Let's work together</a>
+        </div>
+        <ul class="about-principles" data-flow="right">
+          <li>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
+            <div><h3>Ship complete</h3><p>Frontend, backend, deployment — I own the whole stack.</p></div>
+          </li>
+          <li>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            <div><h3>Motion with meaning</h3><p>Animation that explains state, never decoration for its own sake.</p></div>
+          </li>
+          <li>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+            <div><h3>AI-native</h3><p>LLM orchestration, agents, and streaming UX as first-class features.</p></div>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ SKILLS ============ -->
+    <section class="section" id="skills">
+      <div class="section-head reveal">
+        <p class="section-eyebrow">Toolkit</p>
+        <h2>Technologies I work with</h2>
+      </div>
+      <div class="skills-grid">
+        <div class="skill-group" data-flow="up">
+          <h3>Frontend</h3>
+          <ul><li>React</li><li>TypeScript</li><li>Vite</li><li>Tailwind CSS</li><li>Three.js</li></ul>
+        </div>
+        <div class="skill-group" data-flow="up">
+          <h3>Backend</h3>
+          <ul><li>Node.js</li><li>Express</li><li>WebSockets</li><li>REST APIs</li></ul>
+        </div>
+        <div class="skill-group" data-flow="up">
+          <h3>AI / ML</h3>
+          <ul><li>LLM orchestration</li><li>Multi-agent systems</li><li>NVIDIA NIM</li><li>MediaPipe</li></ul>
+        </div>
+        <div class="skill-group" data-flow="up">
+          <h3>Craft</h3>
+          <ul><li>UI/UX design</li><li>Motion design</li><li>Accessibility</li><li>Git</li></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CONTACT ============ -->
+    <section class="section section-contact" id="contact">
+      <div class="contact-card" data-flow="up">
+        <p class="section-eyebrow">Contact</p>
+        <h2>Have a project in mind?</h2>
+        <p>I'm open to internships, collaborations, and freelance work. The fastest way to reach me is email — I usually reply within a day.</p>
+        <div class="contact-actions">
+          <a class="btn btn-primary" href="mailto:robinsonjustin900@gmail.com">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+            robinsonjustin900@gmail.com
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/justin69cmd" target="_blank" rel="noopener noreferrer">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
+            GitHub
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>© 2026 Justin Robinson. Designed &amp; built from scratch.</p>
+    <a href="#top" class="back-top">
+      Back to top
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+    </a>
+  </footer>
+
+  <script src="script.js"></script>
+  <script src="ascii-effect.js"></script>
+  <script src="scroll-flow.js"></script>
+</body>
+</html>
