@@ -149,6 +149,10 @@ a:hover { color: var(--accent-hover); text-decoration: underline; }
   background: var(--surface-2); border-radius: 0 8px 8px 0; color: var(--text-soft); font-style: italic;
 }
 .prose img { border-radius: 12px; margin: 1.75rem auto; box-shadow: var(--shadow); }
+.prose figure { margin: 2rem 0; }
+.prose figure img { margin: 0 auto 0.5rem; width: 100%; }
+.prose figure figcaption { font-size: 0.82rem; color: var(--text-faint); text-align: center; }
+.prose figure figcaption a { color: var(--text-soft); }
 .prose code { background: var(--surface-2); padding: 0.1rem 0.4rem; border-radius: 6px; font-size: 0.9em; }
 .prose a { text-decoration: underline; text-underline-offset: 2px; }
 

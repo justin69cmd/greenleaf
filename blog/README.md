@@ -74,7 +74,33 @@ npm run generate -- --dry      # preview which topics would be written
   in batches over days — respecting your LLM's free-tier rate limits — until the
   backlog is done. Every run adds to the library; nothing is overwritten.
 
-64 starter topics are already in `scripts/topics.json`.
+**~800 topics** (about 100 per category) already ship in `scripts/topics.json`, so
+you can generate a large library immediately — just run `npm run generate` in
+batches. Add more anytime with `npm run generate:topics`.
+
+Each generated article is **long-form (~1,500–2,000 words)** with a hero image,
+**2–3 inline images hotlinked from the web** (never downloaded), and real
+reference links.
+
+### Generate everything, unattended
+
+Two hands-off ways to fill in all ~800 (both resume automatically and skip what's
+already written):
+
+```bash
+# Option A — one long run: start it and walk away
+npm run generate:all          # loops batches until done, backs off on rate limits
+
+# Option B — a macOS schedule: one batch every 30 min, survives reboots
+cp scripts/launchd-generate.plist.example ~/Library/LaunchAgents/com.greenleaf.blog.plist
+launchctl load ~/Library/LaunchAgents/com.greenleaf.blog.plist
+tail -f ~/greenleaf-blog-gen.log      # watch progress
+launchctl unload ~/Library/LaunchAgents/com.greenleaf.blog.plist   # stop when done
+```
+
+From the **repo root** you can also drive everything without `cd blog`:
+`npm run blog:generate:all`, `npm run blog:generate`, `npm run blog:topics`,
+`npm run blog:dev`.
 
 ### A note on scale & rate limits
 
@@ -85,14 +111,22 @@ batches. Astro itself builds thousands of pages comfortably; the sitemap is
 auto-split into chunks, and images are served by path (not rebuilt per post) so
 build times stay reasonable.
 
-## Images (licensed + AI)
+## Images — hero + inline, hotlinked from the web (never downloaded)
 
-`scripts/lib/images.mjs` sources a hero per post in this order:
+`scripts/lib/images.mjs` sources a hero **and 2–3 inline images per article** as
+remote URLs, in this order:
 
-1. **Unsplash** (needs `UNSPLASH_ACCESS_KEY`) — attribution rendered under the hero.
+1. **Unsplash** (needs `UNSPLASH_ACCESS_KEY`) — best quality, author attribution.
 2. **Pexels** (needs `PEXELS_API_KEY`).
 3. **Wikimedia Commons** (no key).
-4. **Local SVG fallback** in `public/heroes/` — always safe, no licensing worry.
+4. **LoremFlickr** (no key) — topical Flickr Creative-Commons images. This is the
+   keyless default, so articles get real photos even with no API key set.
+5. **Local SVG fallback** in `public/heroes/` — hero only, last resort.
+
+Every image is a hotlink; nothing is written to disk. Each carries a caption
+crediting the source. **For a production blog, add a free `UNSPLASH_ACCESS_KEY`** —
+you get higher-quality, properly-attributed photos on stable CDN URLs (the keyless
+LoremFlickr fallback is fine to start but less predictable at scale).
 
 Every licensed image records the author + source + link in the post's
 `imageCredit`, which is shown under the image and is the correct way to use these

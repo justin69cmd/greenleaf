@@ -22,3 +22,9 @@ server/agent_workspace/
 
 # Reports (kept local, not published)
 report/
+
+# Archives, backups & scratch (never source)
+*.zip
+*.tgz
+*.stitchbak
+Claude outputs/

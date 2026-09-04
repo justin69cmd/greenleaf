@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Optional: run ONE generation batch every 30 minutes on your Mac, automatically,
+  resuming across reboots — the library fills itself in over a day or two.
+
+  Install:
+    cp scripts/launchd-generate.plist.example ~/Library/LaunchAgents/com.greenleaf.blog.plist
+    launchctl load ~/Library/LaunchAgents/com.greenleaf.blog.plist
+
+  Watch progress:
+    tail -f ~/greenleaf-blog-gen.log
+
+  Stop it (e.g. once all ~800 are written):
+    launchctl unload ~/Library/LaunchAgents/com.greenleaf.blog.plist
+
+  Adjust the path below if your project isn't at ~/Desktop/P1/equilibrium4.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.greenleaf.blog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd ~/Desktop/P1/equilibrium4/blog &amp;&amp; npm run generate 25 &gt;&gt; ~/greenleaf-blog-gen.log 2&gt;&amp;1</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/greenleaf-blog.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/greenleaf-blog.err</string>
+</dict>
+</plist>

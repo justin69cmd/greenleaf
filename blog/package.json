@@ -8,6 +8,8 @@
     "build": "astro build",
     "preview": "astro preview",
     "generate": "node scripts/generate-posts.mjs",
+    "generate:all": "node scripts/generate-all.mjs",
+    "generate:topics": "node scripts/generate-topics.mjs",
     "generate:images": "node scripts/fetch-images.mjs"
   },
   "dependencies": {
