@@ -99,8 +99,11 @@ return runs belonging to that account.
 
 ### Customer database
 
-Accounts live in a SQLite file — `server/data/greenleaf.db` by default,
-overridable with `DATABASE_FILE`. The schema is created on first boot
+Accounts live in a SQLite file — `server/data/greenleaf.db` by default
+(`/tmp/greenleaf.db` on Vercel, the only writable path there), overridable with
+`DATABASE_FILE`. **On a serverless host accounts do not persist**: each instance
+gets its own copy and `/tmp` is wiped. Deploy to a host with a real disk, or
+move the store to Postgres, before real customers sign up. The schema is created on first boot
 (`server/db.ts`), and a pre-existing `users.json` is imported once and renamed
 to `users.json.migrated`.
 

@@ -12,7 +12,14 @@ import Database from 'better-sqlite3'
 // we fall back to an in-memory database so the app still boots — accounts just
 // won't survive the process.
 
-const DB_FILE = process.env.DATABASE_FILE ?? path.resolve('./data/greenleaf.db')
+// On Vercel the project directory is read-only and only /tmp is writable, so
+// default there instead of falling all the way back to an in-memory database.
+// Either way a serverless instance keeps its own copy: accounts written on one
+// instance are not visible to the next. A host with a real disk (or Postgres)
+// is what makes them stick.
+const DB_FILE =
+  process.env.DATABASE_FILE ??
+  (process.env.VERCEL ? '/tmp/greenleaf.db' : path.resolve('./data/greenleaf.db'))
 
 export type Stage = 'email_otp' | 'totp'
 export type Purpose = 'login' | 'signup'
