@@ -6,11 +6,15 @@ dist/
 
 # Secrets — never commit API keys or SMTP credentials
 .env
+.env.local
 server/.env
 
-# Runtime data
+# Runtime data — the customer database and anything migrated into it
+server/data/
 server/users.json
+server/users.json.migrated
 server/agent_workspace/
+server/agent_runs/
 *.log
 
 # Local tooling

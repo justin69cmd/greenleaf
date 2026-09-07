@@ -1,5 +1,14 @@
 import type { Task, WSMessage, ToolName } from '../types.js'
-import { webSearch, writeFile, callApi, runCode } from './tools.js'
+import {
+  webSearch,
+  writeFile,
+  callApi,
+  runCode,
+  readUrl,
+  readWorkspaceFile,
+  listFiles,
+  makeChart,
+} from './tools.js'
 import {
   chatWithFallback,
   isRequestTooLarge,
@@ -9,6 +18,7 @@ import {
   type ChatCompletion,
 } from './llm.js'
 import { ROLES, normalizeRole } from './roles.js'
+import { throwIfCancelled } from './cancellation.js'
 
 type Sender = (msg: WSMessage) => void
 
@@ -85,6 +95,68 @@ const tools: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'read_url',
+      description:
+        'Fetch a web page and return its readable text. Use this to read a source found with web_search instead of relying on the snippet.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Full http(s) URL of the page to read' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a file a teammate saved earlier in the shared workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Workspace-relative file path, e.g. research_notes.md' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description: 'List the files available in the shared workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          dir: { type: 'string', description: 'Optional workspace-relative subdirectory' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'make_chart',
+      description:
+        'Render numeric data as an SVG chart saved to the workspace. Use for comparisons, trends, and breakdowns.',
+      parameters: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['bar', 'line', 'pie'] },
+          title: { type: 'string' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'One label per data point' },
+          values: { type: 'array', items: { type: 'number' }, description: 'One number per label' },
+          path: { type: 'string', description: 'Optional output filename, e.g. revenue.svg' },
+        },
+        required: ['type', 'title', 'labels', 'values'],
+      },
+    },
+  },
 ]
 
 // Only treat plain objects as valid args. Arrays / strings / numbers are NOT
@@ -131,7 +203,17 @@ function parseArgs(raw: unknown): Record<string, unknown> {
   return pairs
 }
 
-const TOOL_NAMES = ['web_search', 'write_file', 'call_api', 'send_email', 'run_code']
+const TOOL_NAMES = [
+  'web_search',
+  'write_file',
+  'call_api',
+  'send_email',
+  'run_code',
+  'read_url',
+  'read_file',
+  'list_files',
+  'make_chart',
+]
 
 // Llama-on-Groq sometimes emits a tool call in its own malformed syntax, e.g.
 //   <function=web_search {"query": "..."} </function>
@@ -177,7 +259,18 @@ function toStr(v: unknown): string {
   return String(v)
 }
 
-async function dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
+// gpt-oss emits OpenAI "harmony" channel markers, which can ride along in the
+// tool name (`call_api<|channel|>commentary`). Strip them, or the call is
+// dispatched as an unknown tool and the step is wasted.
+export function normalizeToolName(raw: string): string {
+  return String(raw ?? '')
+    .split('<|')[0]
+    .replace(/[^a-zA-Z0-9_]/g, '')
+    .trim()
+}
+
+async function dispatchTool(rawName: string, args: Record<string, unknown>): Promise<string> {
+  const name = normalizeToolName(rawName)
   switch (name) {
     case 'web_search':
       return (await webSearch(toStr(args.query))).output
@@ -202,6 +295,36 @@ async function dispatchTool(name: string, args: Record<string, unknown>): Promis
       )).output
     case 'run_code':
       return (await runCode(toStr(args.code))).output
+    case 'read_url':
+      return (await readUrl(toStr(args.url))).output
+    case 'read_file':
+      return (await readWorkspaceFile(toStr(args.path ?? args.file ?? args.filename))).output
+    case 'list_files':
+      return (await listFiles(toStr(args.dir ?? args.path) || '.')).output
+    case 'make_chart': {
+      // Models occasionally send the series as a JSON string or as
+      // [{label, value}] objects — normalise both into parallel arrays.
+      let labels = args.labels
+      let values = args.values
+      const coerceArray = (v: unknown): unknown => {
+        if (typeof v !== 'string') return v
+        try { return JSON.parse(v) } catch { return v.split(',').map((x) => x.trim()) }
+      }
+      labels = coerceArray(labels)
+      values = coerceArray(values)
+      const data = coerceArray(args.data)
+      if (Array.isArray(data) && !Array.isArray(values)) {
+        labels = data.map((d) => toStr(asRecord(d)?.label ?? asRecord(d)?.name ?? ''))
+        values = data.map((d) => asRecord(d)?.value ?? asRecord(d)?.y ?? 0)
+      }
+      return (await makeChart(
+        toStr(args.type) || 'bar',
+        toStr(args.title),
+        labels,
+        values,
+        args.path ? toStr(args.path) : undefined
+      )).output
+    }
     default:
       return `Unknown tool: ${name}`
   }
@@ -210,6 +333,10 @@ async function dispatchTool(name: string, args: Record<string, unknown>): Promis
 export interface ExecContext {
   goal: string
   previous: { description: string; result: string }[]
+  /** Aborts the task between steps when the user cancels the run. */
+  signal?: AbortSignal
+  /** Relevant passages recalled from this user's earlier runs. */
+  memoryBlock?: string
 }
 
 // Free-tier Groq models have a ~6k tokens-per-minute cap, so we keep each
@@ -245,13 +372,14 @@ export async function executeTask(task: Task, send: Sender, ctx: ExecContext): P
     { role: 'system', content: spec.prompt },
     {
       role: 'user',
-      content: `Overall goal: ${ctx.goal}\n\nYour current task: ${task.description}${previousBlock}`,
+      content: `Overall goal: ${ctx.goal}\n\nYour current task: ${task.description}${previousBlock}${ctx.memoryBlock ?? ''}`,
     },
   ]
 
   send({ type: 'log', payload: `${spec.icon} ${spec.label}: ${task.description}` })
 
   for (let i = 0; i < 6; i++) {
+    throwIfCancelled(ctx.signal)
     let response: ChatCompletion
     try {
       response = (
@@ -306,8 +434,9 @@ export async function executeTask(task: Task, send: Sender, ctx: ExecContext): P
     }
 
     for (const toolCall of message.tool_calls) {
+      throwIfCancelled(ctx.signal)
       if (toolCall.type !== 'function') continue // narrow the union; we only define function tools
-      const name = toolCall.function.name
+      const name = normalizeToolName(toolCall.function.name)
       const args = parseArgs(toolCall.function.arguments)
 
       send({ type: 'tool_call', payload: { tool: name, args } })
@@ -353,7 +482,12 @@ export async function executeTask(task: Task, send: Sender, ctx: ExecContext): P
 
 // Produce a real, consolidated final answer from all task results instead of a
 // generic "Completed X/Y tasks" line.
-export async function synthesize(goal: string, tasks: Task[], feedback?: string): Promise<string> {
+export async function synthesize(
+  goal: string,
+  tasks: Task[],
+  feedback?: string,
+  memoryBlock?: string
+): Promise<string> {
   const done = tasks.filter((t) => t.status === 'done').length
   const fallback = `Completed ${done}/${tasks.length} tasks.`
 
@@ -371,7 +505,7 @@ export async function synthesize(goal: string, tasks: Task[], feedback?: string)
         { role: 'system', content: SYNTH_PROMPT },
         {
           role: 'user',
-          content: `User goal: ${goal}\n\nCompleted work:\n${work}${revision}\n\nWrite the final answer for the user.`,
+          content: `User goal: ${goal}\n\nCompleted work:\n${work}${memoryBlock ?? ''}${revision}\n\nWrite the final answer for the user.`,
         },
       ],
       max_tokens: 1024,

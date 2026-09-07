@@ -9,15 +9,23 @@ are downloadable straight from the conversation.
 ## ✨ Features
 
 - **Agent swarm** — an orchestrator LLM plans subtasks and routes them to role specialists with
-  their own tools (web search, file writing, code execution, API calls)
+  their own tools (web search, page reading, file writing, code execution, API calls, charting)
+- **Parallel execution** — the plan is a dependency *graph*, not a list: independent subtasks run
+  at the same time, so a run costs the depth of the graph rather than its size
 - **Critic loop** — a reviewer model grades the final answer and can demand one revision before
   anything reaches the user
+- **Long-term memory** — finished runs are stored per account, and a new goal that resembles
+  earlier work is planned and answered with that work as context
+- **Run history** — search, reopen, and delete past runs; every artifact stays downloadable
+- **Stop button** — cancel a run mid-flight; the swarm stands down between steps and saves what it has
+- **Live telemetry** — token spend, call count, elapsed time, and which model actually answered
 - **Model resilience** — automatic fallback chain across NVIDIA-hosted models on rate limits,
   outages, or empty responses, with per-model cooldowns
 - **Live progress** — every specialist's step streams into the UI over WebSocket with animated
   task states
 - **Real auth** — scrypt-hashed accounts, personalized greeting, session persistence
-- **Tangible output** — files the writer agent saves appear as download chips in the chat
+- **Tangible output** — files the agents save appear as download chips in the chat, with charts
+  previewed inline
 - **Voice input**, follow-up suggestion chips, refresh-proof conversations, and a gesture-reactive
   canvas of drifting leaves
 
@@ -30,25 +38,30 @@ flowchart LR
     end
 
     subgraph Backend [Express + WebSocket]
-        WS[WS session] --> PL[Planner\norchestrator LLM]
-        PL --> R[🔍 Researcher]
-        PL --> W[✍️ Writer]
-        PL --> A[📊 Analyst]
+        WS[WS session] --> MEM[🧠 Memory\nrecall past runs]
+        MEM --> PL[Planner\norchestrator LLM]
+        PL --> SW{{Scheduler\nruns a DAG in parallel}}
+        SW --> R[🔍 Researcher]
+        SW --> W[✍️ Writer]
+        SW --> A[📊 Analyst]
         R & W & A --> SY[Synthesizer]
         SY --> CR[🧐 Critic]
         CR -->|revise once| SY
+        SY --> ST[(Run store\nhistory + memory)]
     end
 
     UI <-->|goal / progress / answer| WS
-    R -->|web_search| NET[(Web)]
-    W -->|write_file| FS[(agent_workspace)]
-    A -->|run_code / call_api| FS
+    R -->|web_search · read_url| NET[(Web)]
+    W -->|write_file · read_file| FS[(agent_workspace)]
+    A -->|run_code · call_api · make_chart| FS
     SY --> LLM[NVIDIA NIM API\nfallback chain]
 ```
 
-**Model chain** (env-configurable, benchmarked for tool-calling): `nvidia/llama-3.3-nemotron-super-49b-v1.5`
-→ `minimaxai/minimax-m2.7` → `meta/llama-3.3-70b-instruct` → `meta/llama-3.1-8b-instruct`, with a
-fast small-first chain for lightweight calls (critic, clarifier).
+**Model chain** (env-configurable, re-benchmarked 2026-09-04 on tool-calling, planner JSON, critic
+and clarifier): `nvidia/nemotron-3-super-120b-a12b` → `openai/gpt-oss-20b` →
+`nvidia/nemotron-3-ultra-550b-a55b`. The chain advances automatically on rate limits, empty
+responses, and 404s, with per-model cooldowns. Catalog ids drift and a listed model can still 404 on
+completions, so validate with a real call before changing the chain.
 
 ## 🚀 Quickstart
 

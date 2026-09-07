@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import { recordUsage } from './usage.js'
 
 // Centralized LLM access via NVIDIA's NIM API, with automatic model fallback.
 //
@@ -8,13 +9,31 @@ import OpenAI from 'openai'
 // in the chain — each hosted model has its own quota bucket, so falling back
 // keeps the agent working.
 
-// Defaults picked by benchmarking tool-calling on this account's catalog (2026-07-02):
-// nemotron-super answered a tool-call prompt correctly in ~5s; minimax-m2.7 was
-// correct but ~26s; minimax-m3 ignored tools; kimi-k2.6 emitted corrupt arguments.
-const PRIMARY = process.env.NVIDIA_MODEL || 'nvidia/llama-3.3-nemotron-super-49b-v1.5'
+// Defaults re-benchmarked against this account's live catalog on 2026-09-04,
+// after every model in the previous chain was retired. Each candidate was run
+// through this module on four real prompts from the app — a tool call, a
+// planner JSON plan, a critic verdict, and a clarifier question set.
+//
+// Kept (correct on all four):
+//   nemotron-3-super-120b   tool 1.2s · plan 3.1s · critic 5.8s · clarify 3.8s
+//   gpt-oss-20b             tool 1.9s · plan 13.9s · critic 6.7s
+//   nemotron-3-ultra-550b   correct throughout, but often minutes per call —
+//                           a last resort, not a working default.
+//
+// Rejected, and why (do not re-add without re-testing):
+//   minimax-m3              ignores the `tools` parameter entirely
+//   nemotron-3.5-lightning  emits plain-text reasoning with no <think> tags, so
+//                           stripThink can't remove it and every JSON answer
+//                           (critic, clarifier) fails to parse
+//   kimi-k3, gemma-4-31b    request timeouts / ~19 min per call
+//   deepseek-v4-*, mistral-nemotron   correct but multi-minute
+//
+// NOTE: appearing in models.list() does NOT mean a model is servable on this
+// account — half the catalog returns 404 from the completions endpoint. The
+// chain must be validated with real calls, not just the catalog listing.
+const PRIMARY = process.env.NVIDIA_MODEL || 'nvidia/nemotron-3-super-120b-a12b'
 const FALLBACKS = (
-  process.env.NVIDIA_FALLBACK_MODELS ||
-  'minimaxai/minimax-m2.7,meta/llama-3.3-70b-instruct,meta/llama-3.1-8b-instruct'
+  process.env.NVIDIA_FALLBACK_MODELS || 'openai/gpt-oss-20b,nvidia/nemotron-3-ultra-550b-a55b'
 )
   .split(',')
   .map((s) => s.trim())
@@ -22,9 +41,12 @@ const FALLBACKS = (
 
 export const MODEL_CHAIN = [PRIMARY, ...FALLBACKS.filter((m) => m !== PRIMARY)]
 
-// Small-first chain for lightweight judgment calls (critic, clarify) where
-// latency matters more than depth — ~1-2s instead of ~5s per call.
-const FAST_PRIMARY = process.env.NVIDIA_FAST_MODEL || 'meta/llama-3.1-8b-instruct'
+// Chain for lightweight judgment calls (critic, clarify). This used to lead
+// with a small 8B model for latency, but no small model on the current catalog
+// returns parseable JSON — so it leads with the primary, which was also the
+// fastest model measured. Kept as a separate, env-overridable chain so a
+// genuinely fast small model can be dropped in when one appears.
+const FAST_PRIMARY = process.env.NVIDIA_FAST_MODEL || PRIMARY
 export const FAST_CHAIN = [FAST_PRIMARY, ...MODEL_CHAIN.filter((m) => m !== FAST_PRIMARY)]
 
 // Type aliases so callers don't import any provider SDK directly.
@@ -38,6 +60,13 @@ function nvidiaClient(): OpenAI {
     client = new OpenAI({
       apiKey: process.env.NVIDIA_API_KEY,
       baseURL: 'https://integrate.api.nvidia.com/v1',
+      // These endpoints are shared and queue heavily — the same prompt has
+      // been observed at 4s and at 9 minutes. Cap the wait so a stuck model
+      // fails over to the next one in the chain instead of hanging the run.
+      timeout: Number(process.env.NVIDIA_TIMEOUT_MS ?? 120_000),
+      // The chain is the retry strategy. SDK retries would multiply the
+      // timeout above before we ever reach the next model.
+      maxRetries: 0,
     })
   }
   return client
@@ -58,6 +87,12 @@ export async function verifyLLMKey(): Promise<void> {
     console.log(`✅ NVIDIA API key OK — primary model: ${MODEL_CHAIN[0]}`)
     if (missing.length) {
       console.warn(`⚠️  Not in NVIDIA's model catalog (check for typos): ${missing.join(', ')}`)
+    }
+    // Catalog membership is necessary but not sufficient — many listed models
+    // 404 from the completions endpoint on this account. A model that passes
+    // this check can still be dead; the chain advances on 404 at call time.
+    if (missing.length === MODEL_CHAIN.length) {
+      console.warn('   Every model in the chain is missing — the agent will fail until NVIDIA_MODEL is updated.')
     }
   } catch (err) {
     const status = (err as { status?: number })?.status
@@ -85,6 +120,24 @@ export function isRequestTooLarge(err: unknown): boolean {
     msg.includes('reduce your message size') ||
     msg.includes('maximum context length')
   )
+}
+
+// The request never got a usable answer, but the model didn't refuse it — a
+// timeout, a dropped connection, or a 5xx. On NVIDIA's shared endpoints this is
+// the most common real failure: the model is fine, that instance is swamped.
+// Treated like a rate limit so the chain advances instead of failing the call.
+export function isTransient(err: unknown): boolean {
+  const e = err as { status?: number; code?: string; name?: string; message?: string }
+  if (typeof e?.status === 'number' && e.status >= 500) return true
+  if (e?.name === 'APIConnectionTimeoutError' || e?.name === 'APIConnectionError') return true
+  if (
+    ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT']
+      .includes(e?.code ?? '')
+  ) {
+    return true
+  }
+  const msg = (e?.message ?? String(err)).toLowerCase()
+  return msg.includes('timed out') || msg.includes('timeout') || msg.includes('connection error')
 }
 
 // Model id isn't in this account's catalog (renamed, retired, or gated).
@@ -191,6 +244,8 @@ export async function chatWithFallback(
       const model = order[i]
       try {
         const completion = stripThink(await nvidia.chat.completions.create(adjustForModel(params, model)))
+        // Bill this call to the run's meter (no-op outside a metered run).
+        recordUsage(model, completion.usage)
         const msg = completion.choices[0]?.message
         // Empty answer with no tool calls = the model produced nothing usable
         // (e.g. reasoning consumed the whole budget). Try the next model.
@@ -215,6 +270,13 @@ export async function chatWithFallback(
           cooldownUntil.set(model, Date.now() + parseRetryMs(err))
           if (i < order.length - 1) {
             onFallback?.(model, order[i + 1], 'rate limit reached')
+            continue
+          }
+        } else if (isTransient(err)) {
+          // Short cooldown: the model isn't gone, this endpoint is struggling.
+          cooldownUntil.set(model, Date.now() + 60_000)
+          if (i < order.length - 1) {
+            onFallback?.(model, order[i + 1], 'request timed out')
             continue
           }
         } else {

@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
+import { WS_URL } from '@/api'
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed'
 
@@ -10,6 +11,26 @@ export interface AgentTask {
   status: TaskStatus
   result?: string
   role?: AgentRole
+  /** Ids this task waits on — the plan is a graph, not a list. */
+  dependsOn?: string[]
+  durationMs?: number
+}
+
+/** Live token/latency accounting for the run in flight. */
+export interface AgentUsage {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  calls: number
+  byModel: Record<string, number>
+  elapsedMs: number
+}
+
+/** A past run the swarm recalled as relevant to the current goal. */
+export interface RecalledRun {
+  runId: string
+  title: string
+  when: number
 }
 
 export interface AgentEvent {
@@ -54,9 +75,25 @@ export interface AgentState {
   emailInfo?: string
   clarifyQuestions: string[]
   history: ConversationTurn[]
+  /** Token spend so far, updated live while the swarm works. */
+  usage: AgentUsage
+  /** Past runs the swarm pulled in as context for this goal. */
+  recalled: RecalledRun[]
+  /** Workspace files this run produced. */
+  files: string[]
+  /** Server-side id of the saved run, once it has been persisted. */
+  runId: string
 }
 
-const WS_URL = 'ws://greenleaf-backend.vercel.app'
+const emptyUsage: AgentUsage = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  calls: 0,
+  byModel: {},
+  elapsedMs: 0,
+}
+
 
 const initialState: AgentState = {
   status: 'idle',
@@ -68,6 +105,10 @@ const initialState: AgentState = {
   delivery: 'screen',
   clarifyQuestions: [],
   history: [],
+  usage: emptyUsage,
+  recalled: [],
+  files: [],
+  runId: '',
 }
 
 export function useAgent() {
@@ -92,6 +133,9 @@ export function useAgent() {
         email?: string
         emailOk?: boolean
         emailInfo?: string
+        usage?: AgentUsage
+        files?: string[]
+        runId?: string
       }
       setState((prev) => ({
         ...prev,
@@ -102,6 +146,9 @@ export function useAgent() {
         emailOk: p.emailOk,
         emailedTo: p.email,
         emailInfo: p.emailInfo,
+        usage: p.usage ?? prev.usage,
+        files: p.files ?? prev.files,
+        runId: p.runId ?? prev.runId,
       }))
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
       finishTimerRef.current = window.setTimeout(() => {
@@ -144,6 +191,24 @@ export function useAgent() {
           return { ...prev, tasks: prev.tasks.map((t) => (t.id === updated.id ? updated : t)) }
         }
 
+        case 'usage':
+          return { ...prev, usage: msg.payload as AgentUsage }
+
+        case 'memory':
+          return { ...prev, recalled: msg.payload as RecalledRun[] }
+
+        case 'tool_result': {
+          // Track artifacts as they are produced so the run's files are
+          // available even if it is cancelled before the final answer.
+          const p = msg.payload as { result?: string } | null
+          const written = p?.result?.match(/agent_workspace\/([^\s)]+)/)
+          if (!written?.[1] || prev.files.includes(written[1])) return prev
+          return { ...prev, files: [...prev.files, written[1]] }
+        }
+
+        case 'run_saved':
+          return { ...prev, runId: (msg.payload as { id: string }).id }
+
         case 'cancelled':
           return { ...initialState, history: prev.history }
 
@@ -176,7 +241,9 @@ export function useAgent() {
       const ws = new WebSocket(WS_URL)
       wsRef.current = ws
       ws.onopen = () =>
-        ws.send(JSON.stringify({ type: 'start', goal, delivery: opts.delivery, email: opts.email, token: opts.token }))
+        ws.send(
+          JSON.stringify({ type: 'start', goal, delivery: opts.delivery, email: opts.email, token: opts.token })
+        )
       ws.onmessage = handleMessage
       ws.onerror = () =>
         setState((prev) => ({
@@ -202,9 +269,11 @@ export function useAgent() {
     sendRaw({ type: 'approve' })
   }, [])
 
+  // Stop the run. The server aborts between steps and replies with
+  // `cancelled`, so the local reset happens there — leaving the UI showing
+  // "stopping…" until the swarm has actually stood down.
   const cancel = useCallback(() => {
     sendRaw({ type: 'cancel' })
-    setState((prev) => ({ ...initialState, history: prev.history }))
   }, [])
 
   // Continue the conversation after a result.

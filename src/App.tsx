@@ -36,6 +36,15 @@ export default function App() {
     localStorage.getItem('greenleaf-view') === 'ai' && loadUser() ? 'ai' : 'home'
   )
   const [showAuth, setShowAuth] = useState(false)
+  // Google's callback sends the browser back here with a one-time code; the
+  // auth modal swaps it for a session (or for the authenticator step).
+  const [handoff, setHandoff] = useState<string | undefined>(() => {
+    const code = new URLSearchParams(window.location.search).get('handoff')
+    return code ?? undefined
+  })
+  const [authError, setAuthError] = useState(
+    () => new URLSearchParams(window.location.search).get('auth_error') ?? ''
+  )
   const [showSettings, setShowSettings] = useState(false)
   const toggleMenu = () => setIsOpen((v) => !v)
   const handleSelect = (name: string) => {
@@ -60,6 +69,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('greenleaf-view', view)
   }, [view])
+
+  // Open the modal for a Google return, and clean the code out of the URL so a
+  // refresh (or a shared link) can't replay it.
+  useEffect(() => {
+    if (!handoff && !authError) return
+    setShowAuth(true)
+    window.history.replaceState({}, '', window.location.pathname)
+  }, [handoff, authError])
 
   const handleGetStarted = () => {
     if (user) setView('ai') // already signed in — straight to the planner
@@ -138,11 +155,18 @@ export default function App() {
 
       {showAuth && (
         <GetStartedModal
-          onClose={() => setShowAuth(false)}
+          handoff={handoff}
+          initialError={authError}
+          onClose={() => {
+            setShowAuth(false)
+            setHandoff(undefined)
+            setAuthError('')
+          }}
           onSuccess={(u) => {
             setUser(u)
             localStorage.setItem('greenleaf-user', JSON.stringify(u))
             setShowAuth(false)
+            setHandoff(undefined)
             setView('ai')
           }}
         />

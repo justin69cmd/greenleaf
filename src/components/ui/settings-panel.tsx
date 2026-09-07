@@ -1,4 +1,5 @@
 import { X, LogOut, Trash2 } from 'lucide-react'
+import TwoFactorSettings from './two-factor-settings'
 import type { AuthUser } from './get-started-modal'
 
 export default function SettingsPanel({
@@ -41,6 +42,8 @@ export default function SettingsPanel({
               <p className="text-sm font-medium text-white">{user.name}</p>
               <p className="mt-0.5 text-xs text-neutral-400">{user.email}</p>
             </div>
+
+            <TwoFactorSettings token={user.token} />
 
             <div className="mt-4 space-y-2">
               <button

@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { X, Paperclip, ArrowUp, Mic, RotateCcw, FileText, Copy, Check } from 'lucide-react'
+import { AnimatePresence } from 'framer-motion'
+import { X, Paperclip, ArrowUp, Mic, RotateCcw, Copy, Check, History, Square, Brain } from 'lucide-react'
+import SwarmGraph, { type SwarmTask } from '@/components/ui/swarm-graph'
+import UsageMeter, { type Usage } from '@/components/ui/usage-meter'
+import ArtifactCard from '@/components/ui/artifact-card'
+import RunHistory from '@/components/ui/run-history'
+import { WS_URL, type RunDetail } from '@/api'
 
 const CHIPS = ['Plan my week', 'Set a goal', 'Daily routine', 'Brain dump']
 const FOLLOWUP_CHIPS = ['Refine this plan', 'Make it shorter', 'What should I do first?']
-const WS_URL = 'ws://greenleaf-backend.vercel.app'
-const API = 'https://greenleaf-backend.vercel.app'
 const CHAT_KEY = 'greenleaf-chat'
 
 interface Msg {
@@ -37,18 +41,28 @@ const SpeechRec: (new () => SpeechRecognitionLike) | undefined =
   (window as unknown as Record<string, new () => SpeechRecognitionLike>).SpeechRecognition ??
   (window as unknown as Record<string, new () => SpeechRecognitionLike>).webkitSpeechRecognition
 
-interface TaskInfo {
-  id: string
-  description: string
-  role?: string
-  status: 'pending' | 'running' | 'done' | 'failed'
+const EMPTY_USAGE: Usage = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  calls: 0,
+  byModel: {},
+  elapsedMs: 0,
 }
 
-const ROLE_META: Record<string, { icon: string; label: string }> = {
-  researcher: { icon: '🔍', label: 'Researcher' },
-  writer: { icon: '✍️', label: 'Writer' },
-  analyst: { icon: '📊', label: 'Analyst' },
-  generalist: { icon: '🤖', label: 'Agent' },
+/** A past run the swarm recalled as relevant to the current goal. */
+interface Recalled {
+  runId: string
+  title: string
+}
+
+/** Session token for the signed-in account — scopes run history and memory. */
+function loadToken(): string {
+  try {
+    return (JSON.parse(localStorage.getItem('greenleaf-user') || 'null')?.token as string) || ''
+  } catch {
+    return ''
+  }
 }
 
 interface LeafParticle {
@@ -235,9 +249,14 @@ export default function AIModelView({
   const [input, setInput] = useState('')
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
-  const [tasks, setTasks] = useState<TaskInfo[]>([])
+  const [tasks, setTasks] = useState<SwarmTask[]>([])
   const [listening, setListening] = useState(false)
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [usage, setUsage] = useState<Usage>(EMPTY_USAGE)
+  const [recalled, setRecalled] = useState<Recalled[]>([])
+  const [stopping, setStopping] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+  const [token] = useState(loadToken)
 
   const copyMessage = (i: number, text: string) => {
     navigator.clipboard?.writeText(text).then(() => {
@@ -258,6 +277,11 @@ export default function AIModelView({
   const filesRef = useRef<string[]>([])
   // Mirrors `busy` for event handlers (onclose fires outside the render cycle).
   const busyRef = useRef(false)
+  // Set once a run is cancelled. Work already in flight on the server (a plan
+  // still being drafted, a step mid-tool-call) can emit a few more events
+  // after the `cancelled` reply; without this they would repopulate a panel
+  // the user just dismissed.
+  const cancelledRef = useRef(false)
   const setBusySync = (v: boolean) => {
     busyRef.current = v
     setBusy(v)
@@ -274,8 +298,34 @@ export default function AIModelView({
     setMessages([])
     setTasks([])
     setStatus('')
+    setUsage(EMPTY_USAGE)
+    setRecalled([])
+    setStopping(false)
+    cancelledRef.current = false
     setBusySync(false)
     setStarted(false)
+  }
+
+  // Ask the server to stand the team down. It aborts between steps and replies
+  // with `cancelled`, so the UI stays in "stopping" until the swarm is actually
+  // idle rather than pretending the work stopped instantly.
+  const stopRun = () => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    setStopping(true)
+    setStatus('Stopping the team…')
+    ws.send(JSON.stringify({ type: 'cancel' }))
+  }
+
+  // Reopen a past run as the newest answer in the thread.
+  const openRun = (run: RunDetail) => {
+    setShowHistory(false)
+    setStarted(true)
+    setMessages((m) => [
+      ...m,
+      { role: 'user', text: run.title },
+      { role: 'assistant', text: run.summary, ...(run.files?.length ? { files: run.files } : {}) },
+    ])
   }
 
   const toggleVoice = () => {
@@ -316,6 +366,10 @@ export default function AIModelView({
     setInput('')
     setBusySync(true)
     setTasks([])
+    setUsage(EMPTY_USAGE)
+    setRecalled([])
+    setStopping(false)
+    cancelledRef.current = false
     filesRef.current = []
     setStatus('Connecting…')
 
@@ -324,7 +378,7 @@ export default function AIModelView({
       if (!ws || ws.readyState !== WebSocket.OPEN) return
       if (!convoStartedRef.current) {
         convoStartedRef.current = true
-        ws.send(JSON.stringify({ type: 'start', goal: text, delivery: 'screen', skipClarify: true }))
+        ws.send(JSON.stringify({ type: 'start', goal: text, delivery: 'screen', skipClarify: true, token }))
       } else {
         ws.send(JSON.stringify({ type: 'followup', goal: text }))
       }
@@ -338,6 +392,8 @@ export default function AIModelView({
         return
       }
       const ws = wsRef.current
+      // After a cancel, only the server's own acknowledgement still matters.
+      if (cancelledRef.current && msg.type !== 'cancelled') return
       switch (msg.type) {
         case 'log':
           setStatus(String(msg.payload))
@@ -352,39 +408,61 @@ export default function AIModelView({
           ws?.send(JSON.stringify({ type: 'approve' }))
           break
         case 'plan': {
-          const plan = (msg.payload as TaskInfo[]) ?? []
+          const plan = (msg.payload as SwarmTask[]) ?? []
           setTasks(plan.map((t) => ({ ...t, status: 'pending' })))
           setStatus('The team is on it…')
           break
         }
         case 'task_start': {
-          const t = msg.payload as TaskInfo
+          const t = msg.payload as SwarmTask
           setTasks((prev) => prev.map((p) => (p.id === t.id ? { ...p, status: 'running' } : p)))
           break
         }
         case 'task_done': {
-          const t = msg.payload as TaskInfo
-          setTasks((prev) => prev.map((p) => (p.id === t.id ? { ...p, status: 'done' } : p)))
+          // Merge the whole task back in — it carries the measured duration.
+          const t = msg.payload as SwarmTask
+          setTasks((prev) => prev.map((p) => (p.id === t.id ? { ...p, ...t, status: 'done' } : p)))
           break
         }
+        case 'usage':
+          setUsage(msg.payload as Usage)
+          break
+        case 'memory':
+          setRecalled((msg.payload as Recalled[]) ?? [])
+          break
+        case 'cancelled':
+          cancelledRef.current = true
+          pushAssistant('⏹ Stopped. Nothing further was run.')
+          setStatus('')
+          setTasks([])
+          setStopping(false)
+          setBusySync(false)
+          break
         case 'tool_result': {
           // Collect files the writer saved so the answer can offer downloads.
           const p = msg.payload as { tool?: string; result?: string }
-          const m = p?.tool === 'write_file' && p.result?.match(/File written to agent_workspace\/(.+)$/)
-          if (m && m[1] && !filesRef.current.includes(m[1])) filesRef.current.push(m[1])
+          const m = p?.result?.match(/agent_workspace\/([^\s)]+)/)
+          if (m?.[1] && !filesRef.current.includes(m[1])) filesRef.current.push(m[1])
           break
         }
-        case 'agent_done':
-          pushAssistant((msg.payload as { summary?: string })?.summary ?? 'Done.', filesRef.current)
+        case 'agent_done': {
+          const p = msg.payload as { summary?: string; files?: string[]; usage?: Usage }
+          // Prefer the server's file list — it sees every artifact, including
+          // charts written by tools other than write_file.
+          pushAssistant(p?.summary ?? 'Done.', p?.files?.length ? p.files : filesRef.current)
+          if (p?.usage) setUsage(p.usage)
           setStatus('')
           setTasks([])
+          setStopping(false)
           setBusySync(false)
           window.dispatchEvent(new Event('leaf-burst'))
           break
+        }
         case 'agent_error':
           pushAssistant(`⚠️ ${String(msg.payload)}`)
           setStatus('')
           setTasks([])
+          setStopping(false)
           setBusySync(false)
           break
         default:
@@ -402,6 +480,7 @@ export default function AIModelView({
       ws.onerror = () => {
         setStatus('')
         setTasks([])
+        setStopping(false)
         setBusySync(false)
         pushAssistant('⚠️ Could not reach the planner. Make sure the server is running on port 4000.')
       }
@@ -412,6 +491,7 @@ export default function AIModelView({
         if (busyRef.current) {
           setStatus('')
           setTasks([])
+          setStopping(false)
           setBusySync(false)
           pushAssistant('⚠️ Lost connection to the planner. Check the server, then send your message again.')
         }
@@ -660,17 +740,38 @@ export default function AIModelView({
         <X className="h-5 w-5" />
       </button>
 
-      {started && (
-        <button
-          onClick={newChat}
-          aria-label="Start a new chat"
-          title="New chat"
-          className="absolute left-5 top-5 z-20 flex h-11 items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 text-sm text-white/80 backdrop-blur-md transition-colors hover:bg-white/20 hover:text-white"
-        >
-          <RotateCcw className="h-4 w-4" />
-          New chat
-        </button>
-      )}
+      <div className="absolute left-5 top-5 z-20 flex items-center gap-2">
+        {started && (
+          <button
+            onClick={newChat}
+            aria-label="Start a new chat"
+            title="New chat"
+            className="flex h-11 items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 text-sm text-white/80 backdrop-blur-md transition-colors hover:bg-white/20 hover:text-white"
+          >
+            <RotateCcw className="h-4 w-4" />
+            New chat
+          </button>
+        )}
+        {/* History lives server-side against the account, so it only exists
+            for a signed-in user. */}
+        {token && (
+          <button
+            onClick={() => setShowHistory(true)}
+            aria-label="Open run history"
+            title="Run history"
+            className="flex h-11 items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 text-sm text-white/80 backdrop-blur-md transition-colors hover:bg-white/20 hover:text-white"
+          >
+            <History className="h-4 w-4" />
+            <span className="hidden sm:inline">History</span>
+          </button>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {showHistory && token && (
+          <RunHistory token={token} onOpen={openRun} onClose={() => setShowHistory(false)} />
+        )}
+      </AnimatePresence>
 
       {!started ? (
         /* ── Hero: centred prompt before the first message ── */
@@ -738,22 +839,7 @@ export default function AIModelView({
                           {block}
                         </div>
                       ))}
-                      {m.files && m.files.length > 0 && (
-                        <div className="flex flex-wrap gap-2 border-t border-white/10 pt-3">
-                          {m.files.map((f) => (
-                            <a
-                              key={f}
-                              href={`${API}/files/${f.split('/').map(encodeURIComponent).join('/')}`}
-                              download
-                              className="flex items-center gap-1.5 rounded-full border border-emerald-400/35 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-200 transition-colors hover:bg-emerald-400/20"
-                            >
-                              <FileText className="h-3.5 w-3.5" />
-                              {f}
-                              <span aria-hidden>⬇</span>
-                            </a>
-                          ))}
-                        </div>
-                      )}
+                      {m.files && m.files.length > 0 && <ArtifactCard files={m.files} />}
                     </div>
                   </div>
                 )
@@ -778,43 +864,40 @@ export default function AIModelView({
               {busy && (
                 <div className="answer-reveal self-start w-full max-w-[92%]">
                   <div className="rounded-2xl rounded-bl-md border border-emerald-400/25 bg-neutral-900/65 px-4 py-3 backdrop-blur-md">
-                    {tasks.length > 0 && (
-                      <div className="mb-3 space-y-2 border-b border-white/5 pb-3">
-                        {tasks.map((t) => {
-                          const meta = ROLE_META[t.role ?? 'generalist'] ?? ROLE_META.generalist
-                          return (
-                            <div key={t.id} className="flex items-center gap-2.5 text-sm">
-                              <span className="w-5 text-center">{meta.icon}</span>
-                              <span
-                                className={
-                                  t.status === 'done'
-                                    ? 'flex-1 truncate text-emerald-200/50 line-through decoration-emerald-200/25'
-                                    : t.status === 'running'
-                                      ? 'flex-1 truncate text-white'
-                                      : 'flex-1 truncate text-white/40'
-                                }
-                              >
-                                <span className="mr-1.5 text-[11px] uppercase tracking-wide text-emerald-300/70">
-                                  {meta.label}
-                                </span>
-                                {t.description}
-                              </span>
-                              {t.status === 'done' ? (
-                                <span className="text-emerald-400">✓</span>
-                              ) : t.status === 'running' ? (
-                                <span className="task-dot-running inline-block h-2 w-2 rounded-full bg-emerald-400" />
-                              ) : (
-                                <span className="inline-block h-2 w-2 rounded-full bg-white/15" />
-                              )}
-                            </div>
-                          )
-                        })}
+                    {recalled.length > 0 && (
+                      <div
+                        className="mb-3 flex items-start gap-2 rounded-lg border border-sky-400/20 bg-sky-400/[0.07] px-2.5 py-2 text-[12px] text-sky-200/80"
+                        title={recalled.map((r) => r.title).join('\n')}
+                      >
+                        <Brain className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Building on {recalled.length} earlier run{recalled.length === 1 ? '' : 's'}:{' '}
+                          <span className="text-sky-100/90">{recalled.map((r) => r.title).join(' · ')}</span>
+                        </span>
                       </div>
                     )}
+
+                    {tasks.length > 0 && (
+                      <div className="mb-3 border-b border-white/5 pb-3">
+                        <SwarmGraph tasks={tasks} />
+                      </div>
+                    )}
+
                     <div className="flex items-center gap-2.5 text-sm">
                       <span className="leaf-pulse">🌿</span>
-                      <span className="status-shimmer font-medium">{status || 'Thinking…'}</span>
+                      <span className="status-shimmer flex-1 font-medium">{status || 'Thinking…'}</span>
+                      <button
+                        onClick={stopRun}
+                        disabled={stopping}
+                        title="Stop this run"
+                        className="flex shrink-0 items-center gap-1.5 rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-xs text-white/60 transition-colors hover:border-rose-400/40 hover:text-rose-200 disabled:opacity-40"
+                      >
+                        <Square className="h-3 w-3" fill="currentColor" />
+                        {stopping ? 'Stopping…' : 'Stop'}
+                      </button>
                     </div>
+
+                    <UsageMeter usage={usage} className="mt-2.5 border-t border-white/5 pt-2.5" />
                   </div>
                 </div>
               )}
