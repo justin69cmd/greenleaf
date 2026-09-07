@@ -7,7 +7,8 @@
     "dev": "tsx watch index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "db:customers": "tsx scripts/customers.ts"
+    "db:customers": "tsx scripts/customers.ts",
+    "mail:test": "tsx scripts/mail-test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

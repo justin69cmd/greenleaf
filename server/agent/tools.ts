@@ -2,7 +2,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import nodemailer from 'nodemailer'
+import { sendMail } from '../mailer.js'
 
 const execAsync = promisify(exec)
 
@@ -155,19 +155,11 @@ export async function callApi(
 }
 
 // ── 4. Send Email ─────────────────────────────────────────────────────────────
+// Delivery lives in mailer.ts, so the agent and the sign-in flow share one
+// provider and one set of error messages.
 export async function sendEmail(to: string, subject: string, body: string): Promise<ToolResult> {
-  try {
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST ?? 'smtp.gmail.com',
-      port: Number(process.env.SMTP_PORT ?? 587),
-      secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    })
-    await transporter.sendMail({ from: process.env.SMTP_USER, to, subject, text: body })
-    return { success: true, output: `Email sent to ${to}` }
-  } catch (err) {
-    return { success: false, output: `Email failed: ${String(err)}` }
-  }
+  const result = await sendMail({ to, subject, text: body })
+  return { success: result.ok, output: result.ok ? result.detail : `Email failed: ${result.detail}` }
 }
 
 // ── Send the result as a PDF attachment ────────────────────────────────────────
@@ -178,26 +170,15 @@ export async function sendPdfEmail(
   pdf: Buffer,
   filename = 'equilibrium-report.pdf'
 ): Promise<ToolResult> {
-  try {
-    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-      return { success: false, output: 'Email not configured (missing SMTP_USER / SMTP_PASS).' }
-    }
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST ?? 'smtp.gmail.com',
-      port: Number(process.env.SMTP_PORT ?? 587),
-      secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    })
-    await transporter.sendMail({
-      from: process.env.SMTP_USER,
-      to,
-      subject,
-      text: intro,
-      attachments: [{ filename, content: pdf, contentType: 'application/pdf' }],
-    })
-    return { success: true, output: `Report emailed to ${to}` }
-  } catch (err) {
-    return { success: false, output: `Email failed: ${String(err)}` }
+  const result = await sendMail({
+    to,
+    subject,
+    text: intro,
+    attachments: [{ filename, content: pdf, contentType: 'application/pdf' }],
+  })
+  return {
+    success: result.ok,
+    output: result.ok ? `Report emailed to ${to}` : `Email failed: ${result.detail}`,
   }
 }
 

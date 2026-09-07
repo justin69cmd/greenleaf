@@ -26,6 +26,8 @@ export interface AuthChallenge {
   emailSent: boolean
   /** Dev convenience: present only when the server could not send the email. */
   devCode?: string
+  /** Why delivery failed — sent outside production only. */
+  deliveryError?: string
 }
 
 export interface StageResult {

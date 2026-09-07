@@ -82,13 +82,19 @@ export function useAuthFlow(
     setExpiresIn(c.expiresInSeconds)
     setResendIn(RESEND_COOLDOWN)
     setStep('email_otp')
-    setNotice(
-      c.emailSent
-        ? `We sent a 6-digit code to ${c.email}.`
-        : c.devCode
-          ? `Email delivery is not configured on this server, so here is the code: ${c.devCode}`
-          : 'We could not send the email — check the server logs for the code.'
-    )
+    if (c.emailSent) {
+      setNotice(`We sent a 6-digit code to ${c.email}.`)
+      setError('')
+    } else if (c.devCode) {
+      // Local development: the server could not send, so it handed the code back.
+      setNotice(`Email delivery is down on this server, so here is the code: ${c.devCode}`)
+      setError(c.deliveryError ?? '')
+    } else {
+      // Production with broken mail — say something true and actionable rather
+      // than pointing a customer at server logs they cannot read.
+      setNotice(`We couldn't send a code to ${c.email}.`)
+      setError('Email delivery is currently unavailable, so sign-in cannot finish. Please try again shortly.')
+    }
   }, [])
 
   /** Step 0 — email + password (+ name on signup). */

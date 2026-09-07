@@ -10,6 +10,7 @@ import { runSwarm } from './agent/swarm.js'
 import { reviewResult } from './agent/critic.js'
 import { getClarifyingQuestions } from './agent/clarify.js'
 import { verifyLLMKey } from './agent/llm.js'
+import { verifyMail } from './mailer.js'
 import { generateResultPdf } from './agent/pdf.js'
 import { sendPdfEmail } from './agent/tools.js'
 import QRCode from 'qrcode'
@@ -585,4 +586,10 @@ httpServer.listen(PORT, () => {
   console.log(`   WebSocket ready on ws://localhost:${PORT}\n`)
   void verifyLLMKey()
   void initRunStore()
+  // Sign-in cannot complete without email, so say so at boot rather than
+  // letting the first customer discover it.
+  void verifyMail().then((mail) => {
+    if (mail.ok) console.log(`📧 Email ready via ${mail.provider} — ${mail.detail}`)
+    else console.error(`📧 EMAIL BROKEN (${mail.provider}) — nobody can sign in.\n   ${mail.detail}`)
+  })
 })

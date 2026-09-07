@@ -97,6 +97,30 @@ Run endpoints and the `/auth/totp/*` routes need the session token as
 `Authorization: Bearer <token>` (or `?token=`), and run endpoints only ever
 return runs belonging to that account.
 
+### Email delivery
+
+Layer 1 of sign-in is a code emailed to the customer, so **broken email means
+nobody can sign in**. The server says so at boot, and the whole thing is
+checkable in one command:
+
+```bash
+npm run mail:test                  # verify the credentials
+npm run mail:test you@example.com  # verify, then send a real test message
+```
+
+Two providers, picked from the environment (`server/mailer.ts`):
+
+- `RESEND_API_KEY` — Resend's HTTPS API. Use this on the deployed backend:
+  serverless hosts often block outbound SMTP.
+- `SMTP_USER` + `SMTP_PASS` — plain SMTP, fine locally. For Gmail, `SMTP_PASS`
+  must be a 16-character App Password (2-Step Verification on first), and
+  `SMTP_USER` must be that same full Gmail address. Both a wrong username and a
+  wrong password fail with the same `535` error.
+
+Outside production, a failed send returns the code in the API response so local
+work is never blocked. In production it never does — the sign-in simply cannot
+finish until email works.
+
 ### Customer database
 
 Accounts live in a SQLite file — `server/data/greenleaf.db` by default

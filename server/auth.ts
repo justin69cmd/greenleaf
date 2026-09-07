@@ -1,6 +1,6 @@
 import crypto from 'crypto'
 import path from 'path'
-import nodemailer from 'nodemailer'
+import { mailConfigured, otpEmail, sendMail } from './mailer.js'
 import * as db from './db.js'
 import { authorizeUrl, exchangeCode, googleConfigured, newPkcePair } from './google.js'
 import { safeReturnUrl } from './origins.js'
@@ -103,39 +103,32 @@ function sixDigitCode(): string {
   return String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
 }
 
-const smtpConfigured = () => Boolean(process.env.SMTP_USER && process.env.SMTP_PASS)
-
 // Echo the code back to the client only when it could not be delivered and we
 // are not in production — otherwise a broken mailbox would lock everyone out of
 // the demo. Never echoes once NODE_ENV=production.
 const devEchoAllowed = () =>
   process.env.NODE_ENV !== 'production' || process.env.AUTH_OTP_DEV_ECHO === 'true'
 
-async function deliverOtp(to: string, code: string, purpose: Purpose): Promise<boolean> {
-  const subject = `${code} is your GreenLeaf verification code`
-  const intro =
-    purpose === 'signup'
-      ? 'Welcome to GreenLeaf. Use this code to verify your email address:'
-      : 'Someone is signing in to your GreenLeaf account. Use this code to continue:'
-  const text = `${intro}\n\n    ${code}\n\nIt expires in 5 minutes. If this wasn't you, ignore this email and change your password.`
+/** Why the last send failed, so the API can say something useful outside production. */
+let lastDeliveryError = ''
 
-  if (!smtpConfigured()) {
-    console.warn(`[auth] SMTP not configured — OTP for ${to}: ${code}`)
+async function deliverOtp(to: string, code: string, purpose: Purpose): Promise<boolean> {
+  if (!mailConfigured()) {
+    lastDeliveryError = 'Email is not configured on this server.'
+    console.warn(`[auth] ${lastDeliveryError} OTP for ${to}: ${code}`)
     return false
   }
-  try {
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST ?? 'smtp.gmail.com',
-      port: Number(process.env.SMTP_PORT ?? 587),
-      secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    })
-    await transporter.sendMail({ from: process.env.SMTP_USER, to, subject, text })
+  const result = await sendMail({ to, ...otpEmail(code, purpose) })
+  if (result.ok) {
+    lastDeliveryError = ''
     return true
-  } catch (err) {
-    console.warn(`[auth] OTP email to ${to} failed (${String(err)}) — code: ${code}`)
-    return false
   }
+  // Loud, and with the actionable reason — a silent mail failure means nobody
+  // can sign in, and the cause is almost always a credential.
+  lastDeliveryError = result.detail
+  console.error(`[auth] OTP email to ${to} FAILED via ${result.provider}: ${result.detail}`)
+  console.error(`[auth] code for ${to} was: ${code}`)
+  return false
 }
 
 function getChallenge(id: string): db.ChallengeRow {
@@ -155,6 +148,8 @@ export interface ChallengeResponse {
   emailSent: boolean
   /** Present only when delivery failed outside production. */
   devCode?: string
+  /** Why delivery failed. Only sent outside production — it names the fix. */
+  deliveryError?: string
 }
 
 async function issueOtp(challenge: db.ChallengeRow): Promise<ChallengeResponse> {
@@ -175,7 +170,9 @@ async function issueOtp(challenge: db.ChallengeRow): Promise<ChallengeResponse> 
     factors: totpEnabled ? ['email_otp', 'totp'] : ['email_otp'],
     expiresInSeconds: Math.round(OTP_TTL_MS / 1000),
     emailSent,
-    ...(!emailSent && devEchoAllowed() ? { devCode: code } : {}),
+    ...(!emailSent && devEchoAllowed()
+      ? { devCode: code, ...(lastDeliveryError ? { deliveryError: lastDeliveryError } : {}) }
+      : {}),
   }
 }
 
