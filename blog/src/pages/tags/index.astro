@@ -1,0 +1,40 @@
+---
+import { getCollection } from 'astro:content'
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import { allTags, sortPosts } from '../../utils'
+import { withBase } from '../../base'
+import { TAG_CLOUD_LIMIT } from '../../consts'
+
+const posts = sortPosts(await getCollection('blog'))
+const tags = allTags(posts).slice(0, TAG_CLOUD_LIMIT)
+
+// Size each tag by how often it is used, so the cloud reads at a glance.
+const busiest = tags[0]?.count ?? 1
+const weight = (count: number) => 0.86 + Math.min(1, count / busiest) * 0.5
+---
+<BaseLayout
+  title="Topics"
+  description="Every topic covered in the GreenLeaf Journal, from sleep and nutrition to habits and longevity."
+>
+  <div class="container">
+    <div class="hero" style="padding-bottom:1rem;">
+      <h1>Topics</h1>
+      <p>{tags.length} topics across {posts.length} articles.</p>
+    </div>
+
+    {tags.length > 0 ? (
+      <div class="tagcloud">
+        {tags.map((tag) => (
+          <a href={withBase(`/tags/${tag.slug}/`)} style={`font-size:${weight(tag.count)}rem;`}>
+            #{tag.label}
+            <span class="tagcount">{tag.count}</span>
+          </a>
+        ))}
+      </div>
+    ) : (
+      <p style="text-align:center;color:var(--text-faint);padding:3rem 0;">
+        No tags yet — they appear as articles are published.
+      </p>
+    )}
+  </div>
+</BaseLayout>

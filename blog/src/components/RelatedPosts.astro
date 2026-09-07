@@ -1,0 +1,27 @@
+---
+import type { Post } from '../utils'
+import { formatDate } from '../utils'
+import { withBase } from '../base'
+
+interface Props { posts: Post[] }
+const { posts } = Astro.props
+---
+{posts.length > 0 && (
+  <aside class="related">
+    <h2>Keep reading</h2>
+    <ul>
+      {posts.map((post) => (
+        <li>
+          <a href={withBase(`/${post.id}/`)}>
+            <span class="r-cat">{post.data.category}</span>
+            <span class="r-title">{post.data.title}</span>
+            <span class="r-meta">
+              <time datetime={post.data.pubDate.toISOString()}>{formatDate(post.data.pubDate)}</time>
+              {post.data.readingTime && <> · {post.data.readingTime} min read</>}
+            </span>
+          </a>
+        </li>
+      ))}
+    </ul>
+  </aside>
+)}

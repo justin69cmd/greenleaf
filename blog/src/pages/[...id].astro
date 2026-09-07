@@ -5,7 +5,7 @@ import BlogPost from '../layouts/BlogPost.astro'
 export async function getStaticPaths() {
   // Posts render at the base root, e.g. /blog/<slug>/ (with base "/blog").
   // Reserved segments used by other routes must never be a post slug.
-  const RESERVED = new Set(['articles', 'categories', 'rss.xml', 'index'])
+  const RESERVED = new Set(['articles', 'categories', 'tags', 'search', 'rss.xml', 'search-index.json', 'index'])
   const posts = await getCollection('blog', ({ data }) => import.meta.env.DEV || !data.draft)
   return posts
     .filter((post) => !RESERVED.has(post.id))

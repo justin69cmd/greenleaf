@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./lib/env.mjs"
 /**
  * Expand scripts/topics.json with fresh, specific article ideas per category —
  * this is how you scale toward thousands of posts without hand-writing titles.

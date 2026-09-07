@@ -1,0 +1,47 @@
+---
+import { getCollection } from 'astro:content'
+import BaseLayout from '../../../layouts/BaseLayout.astro'
+import PostCard from '../../../components/PostCard.astro'
+import Pagination from '../../../components/Pagination.astro'
+import { PAGE_SIZE } from '../../../consts'
+import { allTags, postsWithTag, sortPosts } from '../../../utils'
+import { withBase } from '../../../base'
+import type { GetStaticPathsOptions } from 'astro'
+
+export async function getStaticPaths({ paginate }: GetStaticPathsOptions) {
+  const posts = sortPosts(await getCollection('blog'))
+  // One paginated archive per distinct tag slug, so differently-spelled
+  // versions of the same tag land on a single page.
+  return allTags(posts).flatMap((tag) =>
+    paginate(postsWithTag(posts, tag.slug), {
+      pageSize: PAGE_SIZE,
+      params: { tag: tag.slug },
+      props: { label: tag.label },
+    })
+  )
+}
+
+const { page } = Astro.props
+const { label } = Astro.props as { label: string }
+---
+<BaseLayout
+  title={page.currentPage > 1 ? `#${label} · Part ${page.currentPage}` : `#${label}`}
+  description={`Articles tagged “${label}” in the GreenLeaf Journal.`}
+>
+  <div class="container">
+    <div class="hero" style="padding-bottom:1rem;">
+      <h1>#{label}</h1>
+      <p>{page.total} article{page.total === 1 ? '' : 's'} on this topic.</p>
+      <div class="rail">
+        <a href={withBase('/tags/')}>All topics</a>
+        <a href={withBase('/articles/')}>All articles</a>
+      </div>
+    </div>
+
+    <div class="grid">
+      {page.data.map((post) => <PostCard post={post} />)}
+    </div>
+
+    <Pagination page={page} label="Part" />
+  </div>
+</BaseLayout>

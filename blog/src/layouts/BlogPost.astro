@@ -1,15 +1,25 @@
 ---
+import { getCollection } from 'astro:content'
 import BaseLayout from './BaseLayout.astro'
 import References from '../components/References.astro'
+import RelatedPosts from '../components/RelatedPosts.astro'
 import type { Post } from '../utils'
-import { heroSrc, formatDate } from '../utils'
-import { slugifyCategory } from '../consts'
+import { heroSrc, formatDate, relatedPosts, sortPosts } from '../utils'
+import { slugifyCategory, slugifyTag } from '../consts'
 import { withBase, assetUrl } from '../base'
 
 interface Props { post: Post }
 const { post } = Astro.props
 const d = post.data
 const img = assetUrl(heroSrc(d.heroImage))
+
+// Sibling navigation and "keep reading" are computed here rather than passed
+// in, so every route that renders a post gets them for free.
+const all = sortPosts(await getCollection('blog'))
+const position = all.findIndex((p) => p.id === post.id)
+const newer = position > 0 ? all[position - 1] : undefined
+const older = position >= 0 && position < all.length - 1 ? all[position + 1] : undefined
+const related = relatedPosts(post, all, 3)
 
 // JSON-LD Article schema — helps Google understand and surface the post.
 const jsonLd = {
@@ -71,9 +81,28 @@ const jsonLd = {
       <References references={d.references} />
       {d.tags.length > 0 && (
         <div class="tagrow">
-          {d.tags.map((t) => <a href={withBase('/articles/')}>#{t}</a>)}
+          {d.tags.map((t) => <a href={withBase(`/tags/${slugifyTag(t)}/`)}>#{t}</a>)}
         </div>
       )}
+
+      {(newer || older) && (
+        <nav class="postnav" aria-label="More articles">
+          {newer ? (
+            <a class="pn prev" href={withBase(`/${newer.id}/`)} rel="prev">
+              <span class="pn-label">← Newer</span>
+              <span class="pn-title">{newer.data.title}</span>
+            </a>
+          ) : <span class="pn empty"></span>}
+          {older ? (
+            <a class="pn next" href={withBase(`/${older.id}/`)} rel="next">
+              <span class="pn-label">Older →</span>
+              <span class="pn-title">{older.data.title}</span>
+            </a>
+          ) : <span class="pn empty"></span>}
+        </nav>
+      )}
+
+      <RelatedPosts posts={related} />
     </div>
   </article>
 </BaseLayout>

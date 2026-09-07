@@ -1,7 +1,7 @@
 ---
 import { SITE_TITLE, CATEGORIES, slugifyCategory } from '../consts'
 import { withBase } from '../base'
-const top = CATEGORIES.slice(0, 4)
+const top = CATEGORIES.slice(0, 3)
 ---
 <header class="site-header">
   <div class="container bar">
@@ -9,6 +9,14 @@ const top = CATEGORIES.slice(0, 4)
     <nav class="nav" aria-label="Primary">
       <a href={withBase('/articles/')}>All articles</a>
       {top.map((c) => <a href={withBase(`/categories/${slugifyCategory(c)}/`)}>{c}</a>)}
+      <a href={withBase('/tags/')}>Topics</a>
+      <a class="nav-search" href={withBase('/search/')} aria-label="Search articles">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" /><path d="m20 20-3.2-3.2" />
+        </svg>
+        <span>Search</span>
+      </a>
     </nav>
   </div>
 </header>

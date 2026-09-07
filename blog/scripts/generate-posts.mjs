@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./lib/env.mjs"
 /**
  * Batch-generate LONG wellness blog posts as MDX, with inline images hotlinked
  * from the web (never downloaded) and real reference links.

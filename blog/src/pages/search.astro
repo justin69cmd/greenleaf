@@ -1,0 +1,174 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+import { withBase } from '../base'
+import { SITE_TITLE } from '../consts'
+
+// Search runs entirely in the browser against /search-index.json, so this page
+// stays static and works on any host. `noindex` keeps result permutations out
+// of the search engines' index.
+const indexUrl = withBase('/search-index.json')
+const articlesUrl = withBase('/articles/')
+---
+<BaseLayout
+  title="Search"
+  description={`Search every article in ${SITE_TITLE}.`}
+  noindex={true}
+>
+  <div class="container">
+    <div class="hero" style="padding-bottom:1.25rem;">
+      <h1>Search</h1>
+      <p>Find an article by title, topic, tag, or anything in the text.</p>
+    </div>
+
+    <form class="searchbar" role="search" onsubmit="return false;">
+      <label class="sr-only" for="q">Search articles</label>
+      <input
+        id="q"
+        type="search"
+        name="q"
+        placeholder="Try “sleep”, “protein”, “habit stacking”…"
+        autocomplete="off"
+        autofocus
+      />
+    </form>
+
+    <p id="search-status" class="search-status" aria-live="polite">Loading the index…</p>
+    <div id="search-results" class="search-results"></div>
+
+    <p class="search-fallback">
+      Nothing here? <a href={articlesUrl}>Browse every article →</a>
+    </p>
+  </div>
+
+  <script define:vars={{ indexUrl }}>
+    const input = document.getElementById('q')
+    const status = document.getElementById('search-status')
+    const results = document.getElementById('search-results')
+
+    let index = []
+
+    const escapeHtml = (s) =>
+      String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
+      )
+
+    // Score a post against the query terms. Title matches count most, then
+    // tags and category, then the body — so "sleep" surfaces the sleep article
+    // rather than every post that mentions sleeping once.
+    function score(post, terms) {
+      const title = post.title.toLowerCase()
+      const description = post.description.toLowerCase()
+      const tags = post.tags.join(' ').toLowerCase()
+      const category = post.category.toLowerCase()
+      const body = post.body.toLowerCase()
+
+      let total = 0
+      for (const term of terms) {
+        let hit = 0
+        if (title.includes(term)) hit += title.startsWith(term) ? 12 : 8
+        if (tags.includes(term)) hit += 5
+        if (category.includes(term)) hit += 4
+        if (description.includes(term)) hit += 3
+        if (body.includes(term)) hit += 1
+        // Every term must appear somewhere — an AND search is far less noisy
+        // than an OR search on a small corpus.
+        if (hit === 0) return 0
+        total += hit
+      }
+      return total
+    }
+
+    // Pull the sentence around the first match so the result explains itself.
+    function snippet(post, terms) {
+      const haystack = `${post.description} ${post.body}`
+      const lower = haystack.toLowerCase()
+      let at = -1
+      for (const term of terms) {
+        const found = lower.indexOf(term)
+        if (found >= 0 && (at < 0 || found < at)) at = found
+      }
+      if (at < 0) return post.description.slice(0, 180)
+      const start = Math.max(0, at - 70)
+      const text = haystack.slice(start, start + 200).trim()
+      return `${start > 0 ? '…' : ''}${text}…`
+    }
+
+    function highlight(text, terms) {
+      let out = escapeHtml(text)
+      for (const term of terms) {
+        if (!term) continue
+        const safe = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        out = out.replace(new RegExp(`(${safe})`, 'gi'), '<mark>$1</mark>')
+      }
+      return out
+    }
+
+    function render(query) {
+      const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1)
+
+      if (!terms.length) {
+        results.innerHTML = ''
+        status.textContent = index.length
+          ? `Searching ${index.length} article${index.length === 1 ? '' : 's'}.`
+          : ''
+        return
+      }
+
+      const hits = index
+        .map((post) => ({ post, score: score(post, terms) }))
+        .filter((h) => h.score > 0)
+        .sort((a, b) => b.score - a.score || new Date(b.post.date) - new Date(a.post.date))
+        .slice(0, 30)
+
+      status.textContent = hits.length
+        ? `${hits.length} result${hits.length === 1 ? '' : 's'} for “${query}”`
+        : `No results for “${query}”.`
+
+      results.innerHTML = hits
+        .map(
+          ({ post }) => `
+        <a class="sresult" href="${post.url}">
+          <span class="chip">${escapeHtml(post.category)}</span>
+          <h3>${highlight(post.title, terms)}</h3>
+          <p>${highlight(snippet(post, terms), terms)}</p>
+          <span class="r-meta">${new Date(post.date).toLocaleDateString('en-US', {
+            year: 'numeric', month: 'short', day: 'numeric',
+          })} · ${post.readingTime} min read</span>
+        </a>`
+        )
+        .join('')
+    }
+
+    // Keep ?q= in sync so a search can be linked and survives a reload.
+    function syncUrl(query) {
+      const url = new URL(window.location.href)
+      if (query) url.searchParams.set('q', query)
+      else url.searchParams.delete('q')
+      history.replaceState(null, '', url)
+    }
+
+    let timer
+    input.addEventListener('input', () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        render(input.value.trim())
+        syncUrl(input.value.trim())
+      }, 120)
+    })
+
+    fetch(indexUrl)
+      .then((r) => {
+        if (!r.ok) throw new Error(String(r.status))
+        return r.json()
+      })
+      .then((data) => {
+        index = data
+        const initial = new URLSearchParams(window.location.search).get('q') ?? ''
+        if (initial) input.value = initial
+        render(initial.trim())
+      })
+      .catch(() => {
+        status.textContent = 'Search is unavailable right now — try browsing the archive instead.'
+      })
+  </script>
+</BaseLayout>

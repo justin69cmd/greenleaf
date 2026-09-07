@@ -25,3 +25,13 @@ export type Category = (typeof CATEGORIES)[number]
 export function slugifyCategory(c: string): string {
   return c.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
 }
+
+// Tags are free-form in frontmatter, so two posts can write the same tag
+// differently ("Sleep Hygiene" / "sleep-hygiene"). Slugging is what makes them
+// collapse into one archive page.
+export function slugifyTag(t: string): string {
+  return slugifyCategory(t)
+}
+
+// How many tags the /tags/ index shows before the long tail is collapsed.
+export const TAG_CLOUD_LIMIT = 120

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./lib/env.mjs"
 /**
  * Upgrade posts that are still using a local fallback hero (/heroes/*.svg) to a
  * real licensed image, once you've added UNSPLASH_ACCESS_KEY or PEXELS_API_KEY.
