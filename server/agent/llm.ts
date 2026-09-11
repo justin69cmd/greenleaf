@@ -168,6 +168,50 @@ function stripThink(completion: ChatCompletion): ChatCompletion {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * Streaming version of stripThink: models that reason inline emit <think>…</think>
+ * a token at a time, so suppress everything between the tags as it arrives. Also
+ * holds back a partial "<" run in case it turns out to be the start of a tag.
+ */
+export function makeThinkFilter(): (delta: string) => string {
+  let thinking = false
+  let held = ''
+  return (delta) => {
+    let buf = held + delta
+    held = ''
+    let out = ''
+    while (buf) {
+      if (thinking) {
+        const close = buf.indexOf('</think>')
+        if (close === -1) {
+          // Keep a tail that might be a partial closing tag.
+          held = buf.slice(-8)
+          return out
+        }
+        buf = buf.slice(close + 8)
+        thinking = false
+        continue
+      }
+      const open = buf.indexOf('<think>')
+      if (open === -1) {
+        // A trailing '<' may be the start of a tag arriving in the next chunk.
+        const tail = buf.lastIndexOf('<')
+        if (tail !== -1 && buf.length - tail < 7) {
+          out += buf.slice(0, tail)
+          held = buf.slice(tail)
+        } else {
+          out += buf
+        }
+        return out
+      }
+      out += buf.slice(0, open)
+      buf = buf.slice(open + 7)
+      thinking = true
+    }
+    return out
+  }
+}
+
 // Parse a "try again in 17m25.44s"-style hint if present; default to 60s.
 function parseRetryMs(err: unknown): number {
   const msg = (err as { message?: string })?.message ?? String(err)
@@ -222,13 +266,73 @@ function adjustForModel(params: ChatParams, model: string): CreateBody {
   return body
 }
 
+/**
+ * Read a streamed completion, forwarding visible tokens to `onToken`, and
+ * return it in the same shape as a non-streamed call so the rest of the
+ * pipeline (usage accounting, empty-response detection) is untouched.
+ */
+async function streamCompletion(
+  nvidia: OpenAI,
+  body: CreateBody,
+  onToken: (text: string) => void
+): Promise<ChatCompletion> {
+  const stream = await nvidia.chat.completions.create({
+    ...body,
+    stream: true,
+    stream_options: { include_usage: true },
+  })
+
+  const visible = makeThinkFilter()
+  let content = ''
+  let finish: string | null = null
+  let usage: ChatCompletion['usage']
+  let id = ''
+  let modelName = body.model
+
+  for await (const chunk of stream) {
+    id ||= chunk.id
+    modelName = chunk.model || modelName
+    if (chunk.usage) usage = chunk.usage
+    const choice = chunk.choices[0]
+    if (choice?.finish_reason) finish = choice.finish_reason
+    const delta = choice?.delta?.content
+    if (!delta) continue
+    content += delta
+    const shown = visible(delta)
+    if (shown) onToken(shown)
+  }
+
+  return {
+    id: id || 'stream',
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: modelName,
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content, refusal: null },
+        finish_reason: (finish ?? 'stop') as 'stop',
+        logprobs: null,
+      },
+    ],
+    ...(usage ? { usage } : {}),
+  } as ChatCompletion
+}
+
 // Run a chat completion, falling back through MODEL_CHAIN on rate-limit errors.
 // Non-rate-limit errors (e.g. a 400 from a malformed tool call) are re-thrown
 // so the caller can apply its own recovery.
 export async function chatWithFallback(
   params: ChatParams,
   onFallback?: (from: string, to: string, reason: string) => void,
-  chain: string[] = MODEL_CHAIN
+  chain: string[] = MODEL_CHAIN,
+  /**
+   * Receive the answer token by token. Streaming is only used for calls with no
+   * tools — assembling tool-call deltas would buy nothing, since the user never
+   * sees those. Everything else (fallback, cooldowns, usage) is unchanged: the
+   * chunks are reassembled into the same completion shape the caller expects.
+   */
+  onToken?: (text: string) => void
 ): Promise<ChatResult> {
   const nvidia = nvidiaClient()
   let lastErr: unknown
@@ -243,7 +347,12 @@ export async function chatWithFallback(
     for (let i = 0; i < order.length; i++) {
       const model = order[i]
       try {
-        const completion = stripThink(await nvidia.chat.completions.create(adjustForModel(params, model)))
+        const body = adjustForModel(params, model)
+        const completion = stripThink(
+          onToken && !body.tools?.length
+            ? await streamCompletion(nvidia, body, onToken)
+            : await nvidia.chat.completions.create(body)
+        )
         // Bill this call to the run's meter (no-op outside a metered run).
         recordUsage(model, completion.usage)
         const msg = completion.choices[0]?.message

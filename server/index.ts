@@ -405,15 +405,29 @@ wss.on('connection', (ws: WebSocket, req) => {
 
         await runSwarm({ goal, tasks, send: track, signal: controller.signal, memoryBlock })
 
+        // Stream the answer as it is written. The client renders these deltas
+        // into a live bubble; `answer_start` tells it to clear whatever the
+        // previous draft left there, which matters for the critic's revision.
+        const streamAnswer = (label: string) => {
+          send({ type: 'answer_start', payload: label })
+          return (text: string) => send({ type: 'answer_delta', payload: text })
+        }
+
         send({ type: 'log', payload: 'Synthesizing final answer…' })
-        let summary = await synthesize(goal, tasks, undefined, memoryBlock)
+        let summary = await synthesize(goal, tasks, undefined, memoryBlock, streamAnswer('draft'))
 
         // Critic reviews the team's answer; one bounded revision if it's weak.
         send({ type: 'log', payload: '🧐 Critic reviewing the result…' })
         const review = await reviewResult(title, summary)
         if (!review.ok && review.feedback) {
           send({ type: 'log', payload: `Critic requested a revision: ${review.feedback}` })
-          summary = await synthesize(goal, tasks, review.feedback, memoryBlock)
+          summary = await synthesize(
+            goal,
+            tasks,
+            review.feedback,
+            memoryBlock,
+            streamAnswer('revision')
+          )
         }
         lastSummary = summary
 

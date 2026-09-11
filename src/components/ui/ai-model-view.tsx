@@ -254,6 +254,9 @@ export default function AIModelView({
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [usage, setUsage] = useState<Usage>(EMPTY_USAGE)
   const [recalled, setRecalled] = useState<Recalled[]>([])
+  // The answer as it is being written, shown live and then replaced by the
+  // finished message when agent_done lands.
+  const [draft, setDraft] = useState('')
   const [stopping, setStopping] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [token] = useState(loadToken)
@@ -424,6 +427,14 @@ export default function AIModelView({
           setTasks((prev) => prev.map((p) => (p.id === t.id ? { ...p, ...t, status: 'done' } : p)))
           break
         }
+        case 'answer_start':
+          // A new draft (the critic's revision reuses this) — clear the old one.
+          setDraft('')
+          setStatus('Writing the answer…')
+          break
+        case 'answer_delta':
+          setDraft((prev) => prev + String(msg.payload ?? ''))
+          break
         case 'usage':
           setUsage(msg.payload as Usage)
           break
@@ -433,6 +444,7 @@ export default function AIModelView({
         case 'cancelled':
           cancelledRef.current = true
           pushAssistant('⏹ Stopped. Nothing further was run.')
+          setDraft('')
           setStatus('')
           setTasks([])
           setStopping(false)
@@ -451,6 +463,7 @@ export default function AIModelView({
           // charts written by tools other than write_file.
           pushAssistant(p?.summary ?? 'Done.', p?.files?.length ? p.files : filesRef.current)
           if (p?.usage) setUsage(p.usage)
+          setDraft('')
           setStatus('')
           setTasks([])
           setStopping(false)
@@ -460,6 +473,7 @@ export default function AIModelView({
         }
         case 'agent_error':
           pushAssistant(`⚠️ ${String(msg.payload)}`)
+          setDraft('')
           setStatus('')
           setTasks([])
           setStopping(false)
@@ -880,6 +894,16 @@ export default function AIModelView({
                     {tasks.length > 0 && (
                       <div className="mb-3 border-b border-white/5 pb-3">
                         <SwarmGraph tasks={tasks} />
+                      </div>
+                    )}
+
+                    {draft && (
+                      <div className="mb-3 space-y-2 border-b border-white/5 pb-3 text-sm leading-relaxed text-neutral-100">
+                        {(renderRich(draft) as ReactNode[]).map((block, bi) => (
+                          <div key={bi}>{block}</div>
+                        ))}
+                        {/* Cursor, so a pause between tokens still reads as "working". */}
+                        <span className="inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-emerald-400/80" />
                       </div>
                     )}
 

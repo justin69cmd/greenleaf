@@ -60,6 +60,10 @@ export type WSMessageType =
   | 'agent_error'
   | 'cancelled'
   | 'log'
+  // The final answer, streamed: 'answer_start' opens a fresh bubble (and is
+  // sent again for the critic's revision), 'answer_delta' carries each token.
+  | 'answer_start'
+  | 'answer_delta'
   | 'usage'
   | 'memory'
   | 'run_saved'

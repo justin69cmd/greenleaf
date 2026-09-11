@@ -83,6 +83,8 @@ export interface AgentState {
   files: string[]
   /** Server-side id of the saved run, once it has been persisted. */
   runId: string
+  /** The answer as it streams in, before `agent_done` delivers the final text. */
+  streamingAnswer: string
 }
 
 const emptyUsage: AgentUsage = {
@@ -109,6 +111,7 @@ const initialState: AgentState = {
   recalled: [],
   files: [],
   runId: '',
+  streamingAnswer: '',
 }
 
 export function useAgent() {
@@ -140,6 +143,7 @@ export function useAgent() {
       setState((prev) => ({
         ...prev,
         status: 'finishing',
+        streamingAnswer: '',
         summary: p.summary,
         tasks: p.tasks,
         delivery: p.delivery ?? prev.delivery,
@@ -159,6 +163,14 @@ export function useAgent() {
 
     setState((prev) => {
       switch (msg.type) {
+        // A fresh draft is starting (the critic's revision reuses this), so
+        // throw away whatever the previous one had written.
+        case 'answer_start':
+          return { ...prev, streamingAnswer: '' }
+
+        case 'answer_delta':
+          return { ...prev, streamingAnswer: prev.streamingAnswer + (msg.payload as string) }
+
         case 'clarify':
           return {
             ...prev,

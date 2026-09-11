@@ -486,7 +486,9 @@ export async function synthesize(
   goal: string,
   tasks: Task[],
   feedback?: string,
-  memoryBlock?: string
+  memoryBlock?: string,
+  /** Called with each visible token, so the UI can render the answer as it lands. */
+  onToken?: (text: string) => void
 ): Promise<string> {
   const done = tasks.filter((t) => t.status === 'done').length
   const fallback = `Completed ${done}/${tasks.length} tasks.`
@@ -500,17 +502,22 @@ export async function synthesize(
       ? `\n\nA reviewer flagged the previous draft. Address this feedback in your answer: ${feedback}`
       : ''
 
-    const { completion: res } = await chatWithFallback({
-      messages: [
-        { role: 'system', content: SYNTH_PROMPT },
-        {
-          role: 'user',
-          content: `User goal: ${goal}\n\nCompleted work:\n${work}${memoryBlock ?? ''}${revision}\n\nWrite the final answer for the user.`,
-        },
-      ],
-      max_tokens: 1024,
-      temperature: 0.3,
-    })
+    const { completion: res } = await chatWithFallback(
+      {
+        messages: [
+          { role: 'system', content: SYNTH_PROMPT },
+          {
+            role: 'user',
+            content: `User goal: ${goal}\n\nCompleted work:\n${work}${memoryBlock ?? ''}${revision}\n\nWrite the final answer for the user.`,
+          },
+        ],
+        max_tokens: 1024,
+        temperature: 0.3,
+      },
+      undefined,
+      undefined,
+      onToken
+    )
 
     return res.choices[0]?.message?.content?.trim() || fallback
   } catch (err) {

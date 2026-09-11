@@ -269,6 +269,15 @@ export default function AgentPanel({ user, onRequireAuth }: Props) {
             phases={RUN_PHASES}
           />
           <p className="text-xs text-white/40 mb-3 uppercase tracking-wider">{state.goal}</p>
+
+          {/* The answer as it is written, before the finished version arrives. */}
+          {state.streamingAnswer && (
+            <div className="mb-4 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm leading-relaxed text-white/90 whitespace-pre-wrap">
+              {state.streamingAnswer}
+              <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-white/70 align-middle" />
+            </div>
+          )}
+
           <div className="space-y-2">
             {state.tasks.map((task) => (
               <div key={task.id} className="flex items-start gap-3">
