@@ -9,6 +9,7 @@ import GetStartedModal, { type AuthUser } from '@/components/ui/get-started-moda
 import AIModelView from '@/components/ui/ai-model-view'
 import NewsView from '@/components/ui/news-view'
 import SettingsPanel from '@/components/ui/settings-panel'
+import SharedRunView from '@/components/ui/shared-run-view'
 
 function loadUser(): AuthUser | null {
   try {
@@ -44,6 +45,10 @@ export default function App() {
   })
   const [authError, setAuthError] = useState(
     () => new URLSearchParams(window.location.search).get('auth_error') ?? ''
+  )
+  // A share link opens the run read-only, signed in or not.
+  const [sharedToken, setSharedToken] = useState<string | undefined>(
+    () => new URLSearchParams(window.location.search).get('shared') ?? undefined
   )
   const [showSettings, setShowSettings] = useState(false)
   const toggleMenu = () => setIsOpen((v) => !v)
@@ -148,6 +153,18 @@ export default function App() {
       {view === 'ai' && <AIModelView onClose={() => setView('home')} userName={user?.name} />}
 
       {view === 'news' && <NewsView onClose={() => setView('home')} />}
+
+      {sharedToken && (
+        <SharedRunView
+          shareToken={sharedToken}
+          sessionToken={user?.token}
+          viewerName={user?.name}
+          onClose={() => {
+            setSharedToken(undefined)
+            window.history.replaceState({}, '', window.location.pathname)
+          }}
+        />
+      )}
 
       {showSettings && (
         <SettingsPanel user={user} onClose={() => setShowSettings(false)} onSignOut={signOut} />

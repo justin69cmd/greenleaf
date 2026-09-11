@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import express from 'express'
 import path from 'path'
+import crypto from 'crypto'
 import { createServer } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
 import cors from 'cors'
@@ -35,6 +36,7 @@ import { originAllowed, safeReturnUrl } from './origins.js'
 import { UsageMeter, runWithMeter } from './agent/usage.js'
 import { isCancelled } from './agent/cancellation.js'
 import { initRunStore, saveRun, listRuns, getRun, deleteRun, newRunId } from './agent/store.js'
+import * as db from './db.js'
 import { recall, recallBlock, searchRuns } from './agent/memory.js'
 import type { WSMessage, Task, RunRecord } from './types.js'
 
@@ -237,6 +239,153 @@ app.post('/auth/logout', (req, res) => {
   const header = req.headers.authorization
   revokeToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined)
   res.json({ ok: true })
+})
+
+// ── Sharing a run ────────────────────────────────────────────────────────────
+// A share link is a capability: anyone holding it can read that one run. It
+// carries no session, grants nothing else, and dies when the owner revokes it.
+
+function ownerRow(req: express.Request, res: express.Response): db.UserRow | null {
+  const email = userFromRequest(req)
+  const user = email ? db.findUser(email) : undefined
+  if (!user) {
+    res.status(401).json({ error: 'Sign in first.' })
+    return null
+  }
+  return user
+}
+
+/** Publish a run. Idempotent: re-sharing returns the existing link. */
+app.post('/runs/:id/share', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  // getRun scopes by owner, so this cannot publish someone else's run.
+  const run = getRun(req.params.id, owner.email)
+  if (!run) {
+    res.status(404).json({ error: 'Run not found.' })
+    return
+  }
+  const existing = db.findShareByRun(run.id)
+  const share = db.createShare({
+    token: existing?.token ?? crypto.randomBytes(12).toString('base64url'),
+    runId: run.id,
+    ownerId: owner.id,
+    title: run.title,
+    allowComments: (req.body ?? {}).allowComments !== false,
+  })
+  res.json({
+    token: share.token,
+    url: `${safeReturnUrl(undefined)}?shared=${share.token}`,
+    allowComments: Boolean(share.allow_comments),
+    views: share.views,
+  })
+})
+
+app.delete('/runs/:id/share', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  res.json({ revoked: db.deleteShare(req.params.id, owner.id) })
+})
+
+/** Every run this account has published, for the history panel. */
+app.get('/shares', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  res.json({
+    shares: db.listSharesForOwner(owner.id).map((s) => ({
+      runId: s.run_id,
+      token: s.token,
+      title: s.title,
+      views: s.views,
+      allowComments: Boolean(s.allow_comments),
+      createdAt: s.created_at,
+    })),
+  })
+})
+
+/**
+ * The public read. No authentication — the link is the credential — so this
+ * returns only what the owner meant to publish: the answer and what produced
+ * it. Never the owner's email, never the file list, never anything about the
+ * account.
+ */
+app.get('/shared/:token', (req, res) => {
+  // The viewer is anonymous, so the run is fetched as the owner recorded on
+  // the share row — the link itself is the authorisation.
+  const share = db.findShare(req.params.token)
+  const owner = share ? db.findUserById(share.owner_id) : undefined
+  const run = share && owner ? getRun(share.run_id, owner.email) : null
+  if (!share || !run) {
+    res.status(404).json({ error: 'This link is no longer available.' })
+    return
+  }
+  db.countShareView(share.token)
+  res.json({
+    title: run.title,
+    goal: run.goal,
+    summary: run.summary,
+    finishedAt: run.finishedAt,
+    status: run.status,
+    tasks: run.tasks.map((t) => ({
+      id: t.id,
+      description: t.description,
+      role: t.role,
+      status: t.status,
+    })),
+    allowComments: Boolean(share.allow_comments),
+    comments: db.listComments(share.token).map((c) => ({
+      id: c.id,
+      author: c.author,
+      body: c.body,
+      at: c.created_at,
+      verified: c.user_id !== null,
+    })),
+  })
+})
+
+app.post('/shared/:token/comments', authLimiter, (req, res) => {
+  const share = db.findShare(req.params.token)
+  if (!share) {
+    res.status(404).json({ error: 'This link is no longer available.' })
+    return
+  }
+  if (!share.allow_comments) {
+    res.status(403).json({ error: 'Comments are turned off for this run.' })
+    return
+  }
+  const body = String((req.body ?? {}).body ?? '').trim()
+  if (!body) {
+    res.status(400).json({ error: 'Write something first.' })
+    return
+  }
+  // A signed-in commenter is labelled with their real account name; everyone
+  // else picks a display name, which is shown unverified.
+  const email = userFromRequest(req)
+  const account = email ? db.findUser(email) : undefined
+  const author = account?.name ?? String((req.body ?? {}).author ?? '').trim().slice(0, 40)
+  if (!author) {
+    res.status(400).json({ error: 'Add your name so the owner knows who commented.' })
+    return
+  }
+  const comment = db.addComment({
+    token: share.token,
+    author,
+    userId: account?.id ?? null,
+    body: body.slice(0, 2000),
+  })
+  res.json({
+    id: comment.id,
+    author: comment.author,
+    body: comment.body,
+    at: comment.created_at,
+    verified: comment.user_id !== null,
+  })
+})
+
+app.delete('/shared/comments/:id', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  res.json({ deleted: db.deleteComment(Number(req.params.id), owner.id) })
 })
 
 // ── Run history ─────────────────────────────────────────────────────────────

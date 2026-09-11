@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { X, Search, Trash2, Clock, Loader2, History, FileText } from 'lucide-react'
-import { fetchRuns, fetchRun, removeRun, type RunSummary, type RunDetail } from '@/api'
+import { X, Search, Trash2, Clock, Loader2, History, FileText, Share2, Check, Link2 } from 'lucide-react'
+import {
+  fetchRuns,
+  fetchRun,
+  fetchShares,
+  removeRun,
+  shareRun,
+  unshareRun,
+  type RunSummary,
+  type RunDetail,
+  type ShareInfo,
+} from '@/api'
 
 // ── Run history drawer ────────────────────────────────────────────────────────
 // Every completed run is persisted server-side against the signed-in account.
@@ -39,6 +49,10 @@ export default function RunHistory({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [openingId, setOpeningId] = useState<string | null>(null)
+  // runId -> live share link, for the runs this account has published.
+  const [shares, setShares] = useState<Record<string, ShareInfo>>({})
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [sharingId, setSharingId] = useState<string | null>(null)
 
   const load = useCallback(
     async (q: string) => {
@@ -46,6 +60,7 @@ export default function RunHistory({
       setError('')
       try {
         setRuns(await fetchRuns(token, q))
+        setShares(await fetchShares(token).catch(() => ({})))
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not load your history.')
       } finally {
@@ -89,6 +104,40 @@ export default function RunHistory({
     } catch {
       setRuns(previous)
       setError('Could not delete that run.')
+    }
+  }
+
+  /** Publish a run (or copy the link it already has). */
+  const share = async (id: string) => {
+    setSharingId(id)
+    setError('')
+    try {
+      const info = shares[id] ?? (await shareRun(token, id))
+      setShares((prev) => ({ ...prev, [id]: info }))
+      try {
+        await navigator.clipboard.writeText(info.url)
+        setCopiedId(id)
+        setTimeout(() => setCopiedId(null), 1800)
+      } catch {
+        /* clipboard blocked — the link is still in state, shown below the row */
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not share that run.')
+    } finally {
+      setSharingId(null)
+    }
+  }
+
+  const revoke = async (id: string) => {
+    try {
+      await unshareRun(token, id)
+      setShares((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not revoke that link.')
     }
   }
 
@@ -186,16 +235,49 @@ export default function RunHistory({
                   {openingId === run.id ? (
                     <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-emerald-300" />
                   ) : (
-                    <button
-                      onClick={() => void remove(run.id)}
-                      aria-label={`Delete ${run.title}`}
-                      title="Delete"
-                      className="shrink-0 rounded-lg p-1.5 text-white/20 opacity-0 transition-all hover:bg-rose-500/15 hover:text-rose-300 focus:opacity-100 group-hover:opacity-100"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    <div className="flex shrink-0 items-start gap-0.5">
+                      <button
+                        onClick={() => void share(run.id)}
+                        disabled={sharingId === run.id}
+                        aria-label={`Share ${run.title}`}
+                        title={shares[run.id] ? 'Copy share link' : 'Create a share link'}
+                        className={`rounded-lg p-1.5 transition-all hover:bg-emerald-500/15 hover:text-emerald-300 focus:opacity-100 group-hover:opacity-100 ${
+                          shares[run.id] ? 'text-emerald-400/80 opacity-100' : 'text-white/20 opacity-0'
+                        }`}
+                      >
+                        {copiedId === run.id ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Share2 className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                      <button
+                        onClick={() => void remove(run.id)}
+                        aria-label={`Delete ${run.title}`}
+                        title="Delete"
+                        className="rounded-lg p-1.5 text-white/20 opacity-0 transition-all hover:bg-rose-500/15 hover:text-rose-300 focus:opacity-100 group-hover:opacity-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   )}
                 </div>
+
+                {shares[run.id] && (
+                  <div className="mt-2 flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.06] px-2 py-1.5 text-[11px]">
+                    <Link2 className="h-3 w-3 shrink-0 text-emerald-400/80" />
+                    <span className="truncate text-emerald-100/70" title={shares[run.id].url}>
+                      {copiedId === run.id ? 'Link copied — anyone with it can read this run' : shares[run.id].url}
+                    </span>
+                    <button
+                      onClick={() => void revoke(run.id)}
+                      title="Revoke this link"
+                      className="ml-auto shrink-0 text-white/35 transition-colors hover:text-rose-300"
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                )}
               </motion.div>
             ))}
           </AnimatePresence>

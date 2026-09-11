@@ -231,6 +231,94 @@ export async function removeRun(token: string, id: string): Promise<void> {
   await runsFetch(`/runs/${encodeURIComponent(id)}`, token, { method: 'DELETE' })
 }
 
+// ── Sharing ───────────────────────────────────────────────────────────────────
+// A share link is a capability: whoever holds it can read that one run, and
+// nothing else. Revoking deletes the link.
+
+export interface ShareInfo {
+  token: string
+  url: string
+  allowComments: boolean
+  views: number
+}
+
+export interface SharedComment {
+  id: number
+  author: string
+  body: string
+  at: number
+  /** The commenter was signed in, so the name is theirs. */
+  verified: boolean
+}
+
+export interface SharedRun {
+  title: string
+  goal: string
+  summary: string
+  finishedAt: number
+  status: string
+  tasks: { id: string; description: string; role?: string; status: string }[]
+  allowComments: boolean
+  comments: SharedComment[]
+}
+
+export function shareRun(token: string, runId: string, allowComments = true): Promise<ShareInfo> {
+  return runsFetch<ShareInfo>(`/runs/${encodeURIComponent(runId)}/share`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allowComments }),
+  })
+}
+
+export function unshareRun(token: string, runId: string): Promise<{ revoked: boolean }> {
+  return runsFetch<{ revoked: boolean }>(`/runs/${encodeURIComponent(runId)}/share`, token, {
+    method: 'DELETE',
+  })
+}
+
+export async function fetchShares(token: string): Promise<Record<string, ShareInfo>> {
+  const data = await runsFetch<{
+    shares: { runId: string; token: string; title: string; views: number; allowComments: boolean }[]
+  }>('/shares', token)
+  const byRun: Record<string, ShareInfo> = {}
+  for (const s of data.shares ?? []) {
+    byRun[s.runId] = {
+      token: s.token,
+      url: `${window.location.origin}${window.location.pathname}?shared=${s.token}`,
+      allowComments: s.allowComments,
+      views: s.views,
+    }
+  }
+  return byRun
+}
+
+/** Read a shared run. No session needed — the link is the credential. */
+export async function fetchSharedRun(shareToken: string): Promise<SharedRun> {
+  const res = await fetch(`${API_URL}/shared/${encodeURIComponent(shareToken)}`)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error((data as { error?: string }).error || 'This link is no longer available.')
+  return data as SharedRun
+}
+
+export async function postSharedComment(
+  shareToken: string,
+  body: string,
+  author: string,
+  sessionToken?: string
+): Promise<SharedComment> {
+  const res = await fetch(`${API_URL}/shared/${encodeURIComponent(shareToken)}/comments`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    },
+    body: JSON.stringify({ body, author }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error((data as { error?: string }).error || 'Could not post that comment.')
+  return data as SharedComment
+}
+
 /** Download URL for a file an agent saved in the shared workspace. */
 export function fileUrl(relPath: string): string {
   return `${API_URL}/files/${relPath.split('/').map(encodeURIComponent).join('/')}`

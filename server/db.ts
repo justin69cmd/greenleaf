@@ -140,6 +140,31 @@ CREATE TABLE IF NOT EXISTS auth_handoffs (
   created_at INTEGER NOT NULL
 );
 
+-- A run published behind a link. Deleting the row revokes the link.
+CREATE TABLE IF NOT EXISTS shared_runs (
+  token        TEXT    PRIMARY KEY,
+  run_id       TEXT    NOT NULL,
+  owner_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title        TEXT    NOT NULL,
+  allow_comments INTEGER NOT NULL DEFAULT 1,
+  views        INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shared_run ON shared_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_shared_owner ON shared_runs(owner_id);
+
+-- Comments left by whoever opened a shared link.
+CREATE TABLE IF NOT EXISTS run_comments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  token      TEXT    NOT NULL REFERENCES shared_runs(token) ON DELETE CASCADE,
+  author     TEXT    NOT NULL,
+  /** Set when the commenter was signed in, so the owner can trust the name. */
+  user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  body       TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_comments_token ON run_comments(token, id);
+
 -- Audit trail: every attempt at every layer, successful or not.
 CREATE TABLE IF NOT EXISTS login_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,6 +247,10 @@ const selectUserById = db.prepare<[number], UserRow>('SELECT * FROM users WHERE 
 
 export function findUser(email: string): UserRow | undefined {
   return selectUserByEmail.get(email)
+}
+
+export function findUserById(id: number): UserRow | undefined {
+  return selectUserById.get(id)
 }
 
 export function createUser(input: {
@@ -441,6 +470,116 @@ export function takeHandoff(code: string): { payload: string; created_at: number
     .get(code)
   if (row) db.prepare('DELETE FROM auth_handoffs WHERE code = ?').run(code)
   return row
+}
+
+// ── Sharing ───────────────────────────────────────────────────────────────────
+
+export interface SharedRunRow {
+  token: string
+  run_id: string
+  owner_id: number
+  title: string
+  allow_comments: number
+  views: number
+  created_at: number
+}
+
+export interface CommentRow {
+  id: number
+  token: string
+  author: string
+  user_id: number | null
+  body: string
+  created_at: number
+}
+
+export function createShare(input: {
+  token: string
+  runId: string
+  ownerId: number
+  title: string
+  allowComments: boolean
+}): SharedRunRow {
+  db.prepare(
+    `INSERT INTO shared_runs (token, run_id, owner_id, title, allow_comments, created_at)
+     VALUES (@token, @runId, @ownerId, @title, @allowComments, @createdAt)
+     ON CONFLICT(run_id) DO UPDATE SET
+       allow_comments = excluded.allow_comments,
+       title = excluded.title`
+  ).run({
+    token: input.token,
+    runId: input.runId,
+    ownerId: input.ownerId,
+    title: input.title,
+    allowComments: input.allowComments ? 1 : 0,
+    createdAt: Date.now(),
+  })
+  return findShareByRun(input.runId)!
+}
+
+export function findShare(token: string): SharedRunRow | undefined {
+  return db.prepare<[string], SharedRunRow>('SELECT * FROM shared_runs WHERE token = ?').get(token)
+}
+
+export function findShareByRun(runId: string): SharedRunRow | undefined {
+  return db.prepare<[string], SharedRunRow>('SELECT * FROM shared_runs WHERE run_id = ?').get(runId)
+}
+
+export function listSharesForOwner(ownerId: number): SharedRunRow[] {
+  return db
+    .prepare<[number], SharedRunRow>('SELECT * FROM shared_runs WHERE owner_id = ? ORDER BY created_at DESC')
+    .all(ownerId)
+}
+
+export function deleteShare(runId: string, ownerId: number): boolean {
+  return (
+    db.prepare('DELETE FROM shared_runs WHERE run_id = ? AND owner_id = ?').run(runId, ownerId)
+      .changes > 0
+  )
+}
+
+export function countShareView(token: string): void {
+  db.prepare('UPDATE shared_runs SET views = views + 1 WHERE token = ?').run(token)
+}
+
+export function addComment(input: {
+  token: string
+  author: string
+  userId?: number | null
+  body: string
+}): CommentRow {
+  const info = db
+    .prepare(
+      'INSERT INTO run_comments (token, author, user_id, body, created_at) VALUES (@token, @author, @userId, @body, @createdAt)'
+    )
+    .run({
+      token: input.token,
+      author: input.author,
+      userId: input.userId ?? null,
+      body: input.body,
+      createdAt: Date.now(),
+    })
+  return db
+    .prepare<[number], CommentRow>('SELECT * FROM run_comments WHERE id = ?')
+    .get(Number(info.lastInsertRowid))!
+}
+
+export function listComments(token: string): CommentRow[] {
+  return db
+    .prepare<[string], CommentRow>('SELECT * FROM run_comments WHERE token = ? ORDER BY id')
+    .all(token)
+}
+
+export function deleteComment(id: number, ownerId: number): boolean {
+  // Only the run's owner can remove a comment from their shared run.
+  return (
+    db
+      .prepare(
+        `DELETE FROM run_comments
+          WHERE id = ? AND token IN (SELECT token FROM shared_runs WHERE owner_id = ?)`
+      )
+      .run(id, ownerId).changes > 0
+  )
 }
 
 // ── Audit trail ───────────────────────────────────────────────────────────────
