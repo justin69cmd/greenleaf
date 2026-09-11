@@ -1,4 +1,6 @@
-import { X, LogOut, Trash2 } from 'lucide-react'
+import { useState } from 'react'
+import { X, LogOut, Trash2, CalendarClock } from 'lucide-react'
+import SchedulesPanel from './schedules-panel'
 import TwoFactorSettings from './two-factor-settings'
 import type { AuthUser } from './get-started-modal'
 
@@ -11,6 +13,8 @@ export default function SettingsPanel({
   onClose: () => void
   onSignOut: () => void
 }) {
+  const [showSchedules, setShowSchedules] = useState(false)
+
   const clearChat = () => {
     localStorage.removeItem('greenleaf-chat')
     onClose()
@@ -47,6 +51,13 @@ export default function SettingsPanel({
 
             <div className="mt-4 space-y-2">
               <button
+                onClick={() => setShowSchedules(true)}
+                className="flex w-full items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-white/25 hover:text-white"
+              >
+                <CalendarClock className="h-4 w-4" />
+                Schedules
+              </button>
+              <button
                 onClick={clearChat}
                 className="flex w-full items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-white/25 hover:text-white"
               >
@@ -69,6 +80,10 @@ export default function SettingsPanel({
           </p>
         )}
       </div>
+
+      {showSchedules && user && (
+        <SchedulesPanel token={user.token} onClose={() => setShowSchedules(false)} />
+      )}
     </div>
   )
 }

@@ -231,6 +231,74 @@ export async function removeRun(token: string, id: string): Promise<void> {
   await runsFetch(`/runs/${encodeURIComponent(id)}`, token, { method: 'DELETE' })
 }
 
+// ── Schedules ─────────────────────────────────────────────────────────────────
+// A recurring run: "every Sunday at 20:00, plan my week and email me the PDF".
+// Times are stored in the browser's own timezone so they survive DST.
+
+export type Cadence = 'daily' | 'weekdays' | 'weekly'
+
+export interface Schedule {
+  id: number
+  title: string
+  goal: string
+  cadence: Cadence
+  weekday: number | null
+  hour: number
+  minute: number
+  timezone: string
+  delivery: 'screen' | 'email'
+  email: string
+  enabled: boolean
+  lastFiredOn: string | null
+  lastRunId: string | null
+  lastStatus: string | null
+}
+
+export interface NewSchedule {
+  title?: string
+  goal: string
+  cadence: Cadence
+  weekday?: number
+  hour: number
+  minute?: number
+  delivery?: 'screen' | 'email'
+  email?: string
+}
+
+export async function fetchSchedules(token: string): Promise<Schedule[]> {
+  const data = await runsFetch<{ schedules: Schedule[] }>('/schedules', token)
+  return data.schedules ?? []
+}
+
+export function createSchedule(token: string, schedule: NewSchedule): Promise<{ id: number }> {
+  return runsFetch<{ id: number }>('/schedules', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...schedule,
+      // The server needs the zone to know when "20:00" is.
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    }),
+  })
+}
+
+export function setScheduleEnabled(token: string, id: number, enabled: boolean): Promise<{ ok: boolean }> {
+  return runsFetch<{ ok: boolean }>(`/schedules/${id}`, token, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+}
+
+export function deleteSchedule(token: string, id: number): Promise<{ ok: boolean }> {
+  return runsFetch<{ ok: boolean }>(`/schedules/${id}`, token, { method: 'DELETE' })
+}
+
+/** Run one now, ignoring the clock. Resolves when the whole run finishes. */
+export function runScheduleNow(token: string, id: number): Promise<{ runId?: string; status: string }> {
+  return runsFetch<{ runId?: string; status: string }>(`/schedules/${id}/run`, token, { method: 'POST' })
+}
+
 // ── Sharing ───────────────────────────────────────────────────────────────────
 // A share link is a capability: whoever holds it can read that one run, and
 // nothing else. Revoking deletes the link.

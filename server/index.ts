@@ -6,14 +6,11 @@ import { createServer } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
 import cors from 'cors'
 import { planTasks } from './agent/planner.js'
-import { synthesize } from './agent/executor.js'
-import { runSwarm } from './agent/swarm.js'
-import { reviewResult } from './agent/critic.js'
+import { executeRun } from './agent/run.js'
+import { fireSchedule, isDue, runDueSchedules, startScheduler } from './agent/scheduler.js'
 import { getClarifyingQuestions } from './agent/clarify.js'
 import { verifyLLMKey } from './agent/llm.js'
 import { verifyMail } from './mailer.js'
-import { generateResultPdf } from './agent/pdf.js'
-import { sendPdfEmail } from './agent/tools.js'
 import QRCode from 'qrcode'
 import {
   beginSignup,
@@ -33,12 +30,10 @@ import {
   revokeToken,
 } from './auth.js'
 import { originAllowed, safeReturnUrl } from './origins.js'
-import { UsageMeter, runWithMeter } from './agent/usage.js'
-import { isCancelled } from './agent/cancellation.js'
-import { initRunStore, saveRun, listRuns, getRun, deleteRun, newRunId } from './agent/store.js'
+import { initRunStore, listRuns, getRun, deleteRun } from './agent/store.js'
 import * as db from './db.js'
 import { recall, recallBlock, searchRuns } from './agent/memory.js'
-import type { WSMessage, Task, RunRecord } from './types.js'
+import type { WSMessage, Task } from './types.js'
 
 const app = express()
 app.use(cors())
@@ -239,6 +234,117 @@ app.post('/auth/logout', (req, res) => {
   const header = req.headers.authorization
   revokeToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined)
   res.json({ ok: true })
+})
+
+// ── Schedules ────────────────────────────────────────────────────────────────
+// "Every Sunday at 8pm, plan my week and email me the PDF."
+
+const CADENCES = ['daily', 'weekdays', 'weekly'] as const
+
+app.get('/schedules', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  res.json({
+    schedules: db.listSchedules(owner.id).map((s) => ({
+      id: s.id,
+      title: s.title,
+      goal: s.goal,
+      cadence: s.cadence,
+      weekday: s.weekday,
+      hour: s.hour,
+      minute: s.minute,
+      timezone: s.timezone,
+      delivery: s.delivery,
+      email: s.email,
+      enabled: Boolean(s.enabled),
+      lastFiredOn: s.last_fired_on,
+      lastRunId: s.last_run_id,
+      lastStatus: s.last_status,
+      nextDue: isDue(s) ? 'now' : null,
+    })),
+  })
+})
+
+app.post('/schedules', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  const b = (req.body ?? {}) as Record<string, unknown>
+  const goal = String(b.goal ?? '').trim()
+  const cadence = String(b.cadence ?? 'weekly')
+  const hour = Number(b.hour)
+  const minute = Number(b.minute ?? 0)
+
+  if (!goal) {
+    res.status(400).json({ error: 'What should it do? Give it a goal.' })
+    return
+  }
+  if (!CADENCES.includes(cadence as (typeof CADENCES)[number])) {
+    res.status(400).json({ error: 'Cadence must be daily, weekdays or weekly.' })
+    return
+  }
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+    res.status(400).json({ error: 'Pick a valid time of day.' })
+    return
+  }
+  // Cap it: each schedule spends the account's model quota unattended.
+  if (db.listSchedules(owner.id).length >= 10) {
+    res.status(400).json({ error: 'That is as many schedules as one account can have (10).' })
+    return
+  }
+
+  const schedule = db.createSchedule({
+    userId: owner.id,
+    title: String(b.title ?? '').trim() || goal.slice(0, 60),
+    goal,
+    cadence,
+    weekday: cadence === 'weekly' ? Number(b.weekday ?? 0) % 7 : null,
+    hour,
+    minute,
+    timezone: String(b.timezone ?? 'UTC'),
+    delivery: b.delivery === 'screen' ? 'screen' : 'email',
+    email: String(b.email ?? owner.email),
+  })
+  res.json({ id: schedule.id })
+})
+
+app.patch('/schedules/:id', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  const ok = db.setScheduleEnabled(Number(req.params.id), owner.id, (req.body ?? {}).enabled !== false)
+  res.status(ok ? 200 : 404).json(ok ? { ok } : { error: 'Schedule not found.' })
+})
+
+app.delete('/schedules/:id', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  const ok = db.deleteSchedule(Number(req.params.id), owner.id)
+  res.status(ok ? 200 : 404).json(ok ? { ok } : { error: 'Schedule not found.' })
+})
+
+/** Run one now, ignoring the clock. */
+app.post('/schedules/:id/run', async (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  const schedule = db.findSchedule(Number(req.params.id))
+  if (!schedule || schedule.user_id !== owner.id) {
+    res.status(404).json({ error: 'Schedule not found.' })
+    return
+  }
+  res.json(await fireSchedule(schedule))
+})
+
+/**
+ * Cron entry point, for hosts where nothing stays running between requests.
+ * Guarded by CRON_SECRET so it can't be used to burn quota from outside.
+ */
+app.post('/schedules/tick', async (req, res) => {
+  const secret = process.env.CRON_SECRET
+  const offered = req.headers.authorization?.replace(/^Bearer /, '') ?? String(req.query.key ?? '')
+  if (!secret || offered !== secret) {
+    res.status(401).json({ error: 'Not authorised.' })
+    return
+  }
+  res.json({ fired: await runDueSchedules() })
 })
 
 // ── Sharing a run ────────────────────────────────────────────────────────────
@@ -503,123 +609,26 @@ wss.on('connection', (ws: WebSocket, req) => {
     })
   }
 
-  // Run the approved/clarified plan and deliver the result.
+  // Run the approved/clarified plan and deliver the result. The pipeline
+  // itself lives in agent/run.ts, shared with the scheduler; this wrapper owns
+  // the interactive parts — the cancel handle and the follow-up context.
   async function runAndDeliver(goal: string, title: string, delivery: Delivery, email: string, tasks: Task[]) {
-    const runId = newRunId()
-    const meter = new UsageMeter()
     const controller = new AbortController()
     runController = controller
-    const startedAt = Date.now()
-    const files: string[] = []
-
-    // Watch the event stream for artifacts the specialists saved, so the run
-    // record and the client both know what the run actually produced.
-    const track = (msg: WSMessage) => {
-      if (msg.type === 'tool_result') {
-        const p = msg.payload as { result?: string } | null
-        const written = p?.result?.match(/agent_workspace\/([^\s)]+)/)
-        if (written?.[1] && !files.includes(written[1])) files.push(written[1])
-      }
-      send(msg)
-    }
-
-    // Stream token/latency telemetry while the run is in flight.
-    const ticker = setInterval(() => send({ type: 'usage', payload: meter.snapshot() }), 1500)
-
-    const persist = async (status: RunRecord['status'], summary: string, error?: string) => {
-      send({ type: 'usage', payload: meter.snapshot() })
-      if (!user) return
-      const record: RunRecord = {
-        id: runId,
-        user,
-        title,
-        goal,
-        summary,
-        tasks,
-        files,
-        usage: meter.snapshot(),
-        delivery,
-        startedAt,
-        finishedAt: Date.now(),
-        status,
-        ...(error ? { error } : {}),
-      }
-      await saveRun(record)
-      send({ type: 'run_saved', payload: { id: runId, title, status, files } })
-    }
-
     try {
-      await runWithMeter(meter, async () => {
-        send({ type: 'plan', payload: tasks })
-
-        await runSwarm({ goal, tasks, send: track, signal: controller.signal, memoryBlock })
-
-        // Stream the answer as it is written. The client renders these deltas
-        // into a live bubble; `answer_start` tells it to clear whatever the
-        // previous draft left there, which matters for the critic's revision.
-        const streamAnswer = (label: string) => {
-          send({ type: 'answer_start', payload: label })
-          return (text: string) => send({ type: 'answer_delta', payload: text })
-        }
-
-        send({ type: 'log', payload: 'Synthesizing final answer…' })
-        let summary = await synthesize(goal, tasks, undefined, memoryBlock, streamAnswer('draft'))
-
-        // Critic reviews the team's answer; one bounded revision if it's weak.
-        send({ type: 'log', payload: '🧐 Critic reviewing the result…' })
-        const review = await reviewResult(title, summary)
-        if (!review.ok && review.feedback) {
-          send({ type: 'log', payload: `Critic requested a revision: ${review.feedback}` })
-          summary = await synthesize(
-            goal,
-            tasks,
-            review.feedback,
-            memoryBlock,
-            streamAnswer('revision')
-          )
-        }
-        lastSummary = summary
-
-        await persist('done', summary)
-
-        if (delivery === 'email') {
-          send({ type: 'log', payload: `Generating PDF and emailing to ${email}…` })
-          const pdf = await generateResultPdf(title, summary)
-          const intro = `Hi,\n\nYour Equilibrium AI Agent report for "${title}" is attached as a PDF.\n\n— Equilibrium`
-          const mail = await sendPdfEmail(email, `Your Equilibrium report: ${title}`, intro, pdf)
-          send({
-            type: 'agent_done',
-            payload: {
-              runId,
-              goal: title,
-              tasks,
-              summary,
-              files,
-              usage: meter.snapshot(),
-              delivery,
-              email,
-              emailOk: mail.success,
-              emailInfo: mail.output,
-            },
-          })
-        } else {
-          send({
-            type: 'agent_done',
-            payload: { runId, goal: title, tasks, summary, files, usage: meter.snapshot(), delivery },
-          })
-        }
+      const outcome = await executeRun({
+        goal,
+        title,
+        tasks,
+        user,
+        delivery,
+        email,
+        memoryBlock,
+        send,
+        signal: controller.signal,
       })
-    } catch (err) {
-      if (isCancelled(err)) {
-        // No summary: a cancelled run produced no answer, and carrying the
-        // previous turn's summary in would misattribute it to this one.
-        await persist('cancelled', '', 'Cancelled by the user')
-        send({ type: 'cancelled', payload: { runId } })
-      } else {
-        throw err
-      }
+      if (outcome.status === 'done') lastSummary = outcome.summary
     } finally {
-      clearInterval(ticker)
       if (runController === controller) runController = null
     }
   }
@@ -749,6 +758,9 @@ httpServer.listen(PORT, () => {
   console.log(`   WebSocket ready on ws://localhost:${PORT}\n`)
   void verifyLLMKey()
   void initRunStore()
+  // Recurring runs. Needs a process that stays alive; on serverless nothing
+  // ticks, and POST /schedules/tick is the way in.
+  startScheduler()
   // Sign-in cannot complete without email, so say so at boot rather than
   // letting the first customer discover it.
   void verifyMail().then((mail) => {

@@ -165,6 +165,29 @@ CREATE TABLE IF NOT EXISTS run_comments (
 );
 CREATE INDEX IF NOT EXISTS idx_comments_token ON run_comments(token, id);
 
+-- A recurring run. The cadence is stored in the customer's own local time, so
+-- "8pm Sunday" stays 8pm Sunday across daylight-saving changes.
+CREATE TABLE IF NOT EXISTS schedules (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title        TEXT    NOT NULL,
+  goal         TEXT    NOT NULL,
+  cadence      TEXT    NOT NULL,          -- daily | weekdays | weekly
+  weekday      INTEGER,                   -- 0=Sunday, for cadence 'weekly'
+  hour         INTEGER NOT NULL,
+  minute       INTEGER NOT NULL DEFAULT 0,
+  timezone     TEXT    NOT NULL DEFAULT 'UTC',
+  delivery     TEXT    NOT NULL DEFAULT 'email',
+  email        TEXT    NOT NULL,
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  /** Local YYYY-MM-DD of the last fire, so a schedule runs at most once a day. */
+  last_fired_on TEXT,
+  last_run_id  TEXT,
+  last_status  TEXT,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_user ON schedules(user_id);
+
 -- Audit trail: every attempt at every layer, successful or not.
 CREATE TABLE IF NOT EXISTS login_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -580,6 +603,89 @@ export function deleteComment(id: number, ownerId: number): boolean {
       )
       .run(id, ownerId).changes > 0
   )
+}
+
+// ── Schedules ─────────────────────────────────────────────────────────────────
+
+export interface ScheduleRow {
+  id: number
+  user_id: number
+  title: string
+  goal: string
+  cadence: 'daily' | 'weekdays' | 'weekly'
+  weekday: number | null
+  hour: number
+  minute: number
+  timezone: string
+  delivery: 'screen' | 'email'
+  email: string
+  enabled: number
+  last_fired_on: string | null
+  last_run_id: string | null
+  last_status: string | null
+  created_at: number
+}
+
+export function createSchedule(input: {
+  userId: number
+  title: string
+  goal: string
+  cadence: string
+  weekday: number | null
+  hour: number
+  minute: number
+  timezone: string
+  delivery: string
+  email: string
+}): ScheduleRow {
+  const info = db
+    .prepare(
+      `INSERT INTO schedules
+         (user_id, title, goal, cadence, weekday, hour, minute, timezone, delivery, email, created_at)
+       VALUES
+         (@userId, @title, @goal, @cadence, @weekday, @hour, @minute, @timezone, @delivery, @email, @createdAt)`
+    )
+    .run({ ...input, createdAt: Date.now() })
+  return findSchedule(Number(info.lastInsertRowid))!
+}
+
+export function findSchedule(id: number): ScheduleRow | undefined {
+  return db.prepare<[number], ScheduleRow>('SELECT * FROM schedules WHERE id = ?').get(id)
+}
+
+export function listSchedules(userId: number): ScheduleRow[] {
+  return db
+    .prepare<[number], ScheduleRow>('SELECT * FROM schedules WHERE user_id = ? ORDER BY id')
+    .all(userId)
+}
+
+/** Every schedule that could fire, across all accounts — the runner's input. */
+export function allEnabledSchedules(): ScheduleRow[] {
+  return db.prepare<[], ScheduleRow>('SELECT * FROM schedules WHERE enabled = 1').all()
+}
+
+export function setScheduleEnabled(id: number, userId: number, enabled: boolean): boolean {
+  return (
+    db
+      .prepare('UPDATE schedules SET enabled = ? WHERE id = ? AND user_id = ?')
+      .run(enabled ? 1 : 0, id, userId).changes > 0
+  )
+}
+
+export function deleteSchedule(id: number, userId: number): boolean {
+  return db.prepare('DELETE FROM schedules WHERE id = ? AND user_id = ?').run(id, userId).changes > 0
+}
+
+/** Record the outcome of a fire, and the local date that claimed it. */
+export function markScheduleFired(
+  id: number,
+  localDate: string,
+  runId: string | null,
+  status: string
+): void {
+  db.prepare(
+    'UPDATE schedules SET last_fired_on = ?, last_run_id = ?, last_status = ? WHERE id = ?'
+  ).run(localDate, runId, status, id)
 }
 
 // ── Audit trail ───────────────────────────────────────────────────────────────

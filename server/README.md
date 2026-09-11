@@ -84,6 +84,14 @@ the synthesizer as context. The client is told what was recalled.
 | `POST` | `/auth/totp/enable` | Confirm enrolment with a code; returns 8 recovery codes |
 | `POST` | `/auth/totp/disable` | Turn the authenticator off (needs the password) |
 | `POST` | `/auth/logout` | Revoke the current session token |
+| `GET/POST` | `/schedules` | List or create recurring runs |
+| `PATCH/DELETE` | `/schedules/:id` | Pause/resume or delete one |
+| `POST` | `/schedules/:id/run` | Run one now, ignoring the clock |
+| `POST` | `/schedules/tick` | Cron entry point (needs `CRON_SECRET`) |
+| `POST/DELETE` | `/runs/:id/share` | Publish a run behind a link, or revoke it |
+| `GET` | `/shares` | Links this account has published |
+| `GET` | `/shared/:token` | Read a shared run (no session — the link is the credential) |
+| `POST` | `/shared/:token/comments` | Comment on a shared run |
 | `GET` | `/auth/config` | Whether "Continue with Google" is available |
 | `GET` | `/auth/google` | Start a Google sign-in (redirects to Google) |
 | `GET` | `/auth/google/callback` | Google returns here; redirects back to the app with a one-time code |
@@ -96,6 +104,22 @@ the synthesizer as context. The client is told what was recalled.
 Run endpoints and the `/auth/totp/*` routes need the session token as
 `Authorization: Bearer <token>` (or `?token=`), and run endpoints only ever
 return runs belonging to that account.
+
+### Schedules
+
+A schedule is a goal plus a cadence: *every Sunday at 20:00, plan my week and
+email me the PDF*. Scheduled runs go through exactly the same pipeline as the
+chat (`agent/run.ts` is shared by both), so they plan, run the swarm, get
+reviewed by the critic and land in run history.
+
+Cadence is stored in the customer's own timezone rather than as a UTC
+timestamp, so "8pm Sunday" stays 8pm Sunday across daylight-saving changes. A
+schedule fires at most once per local calendar day, which also means a restart
+mid-day cannot replay one that already ran.
+
+The runner is an in-process loop ticking every minute — **it needs a host where
+the process stays alive**. On serverless, set `CRON_SECRET` and have an
+external cron call `POST /schedules/tick` with `Authorization: Bearer <secret>`.
 
 ### Email delivery
 
