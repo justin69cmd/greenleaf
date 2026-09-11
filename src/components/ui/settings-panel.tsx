@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { X, LogOut, Trash2, CalendarClock } from 'lucide-react'
+import { X, LogOut, Trash2, CalendarClock, FileText } from 'lucide-react'
 import SchedulesPanel from './schedules-panel'
+import DocumentsPanel from './documents-panel'
 import TwoFactorSettings from './two-factor-settings'
 import type { AuthUser } from './get-started-modal'
 
@@ -14,6 +15,7 @@ export default function SettingsPanel({
   onSignOut: () => void
 }) {
   const [showSchedules, setShowSchedules] = useState(false)
+  const [showDocuments, setShowDocuments] = useState(false)
 
   const clearChat = () => {
     localStorage.removeItem('greenleaf-chat')
@@ -51,6 +53,13 @@ export default function SettingsPanel({
 
             <div className="mt-4 space-y-2">
               <button
+                onClick={() => setShowDocuments(true)}
+                className="flex w-full items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-white/25 hover:text-white"
+              >
+                <FileText className="h-4 w-4" />
+                Your documents
+              </button>
+              <button
                 onClick={() => setShowSchedules(true)}
                 className="flex w-full items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-white/25 hover:text-white"
               >
@@ -83,6 +92,10 @@ export default function SettingsPanel({
 
       {showSchedules && user && (
         <SchedulesPanel token={user.token} onClose={() => setShowSchedules(false)} />
+      )}
+
+      {showDocuments && user && (
+        <DocumentsPanel token={user.token} onClose={() => setShowDocuments(false)} />
       )}
     </div>
   )

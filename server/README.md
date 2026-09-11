@@ -88,6 +88,9 @@ the synthesizer as context. The client is told what was recalled.
 | `PATCH/DELETE` | `/schedules/:id` | Pause/resume or delete one |
 | `POST` | `/schedules/:id/run` | Run one now, ignoring the clock |
 | `POST` | `/schedules/tick` | Cron entry point (needs `CRON_SECRET`) |
+| `GET/POST` | `/documents` | List documents, or upload one (raw body, `?name=`) |
+| `DELETE` | `/documents/:id` | Delete a document and its passages |
+| `POST` | `/documents/search` | Search your own documents |
 | `GET` | `/calendar/connect` | Ask Google for calendar write access |
 | `POST` | `/calendar/extract` | Propose events from a plan (writes nothing) |
 | `POST` | `/calendar/events` | Write the confirmed events |
@@ -108,6 +111,36 @@ the synthesizer as context. The client is told what was recalled.
 Run endpoints and the `/auth/totp/*` routes need the session token as
 `Authorization: Bearer <token>` (or `?token=`), and run endpoints only ever
 return runs belonging to that account.
+
+### Your documents
+
+Upload a syllabus, notes or a reading list and plans are built from what is
+actually in them. Files are parsed and indexed on upload; **the raw file is
+never stored** — only extracted passages and their vectors.
+
+`agent/documents.ts` handles the three parts that decide whether this works:
+
+- **Extraction.** PDFs come out hard-wrapped with `-- 1 of 3 --` page markers,
+  so lines are rejoined into sentences and the markers stripped. Left alone,
+  that noise decides where passages begin and end.
+- **Chunking.** Each paragraph stands alone unless it is too short to carry
+  meaning. Packing text up to a size limit is the obvious approach and the
+  wrong one: a chunk covering four topics matches none of them strongly.
+  Measured on a real syllabus, packing turned the whole document into one
+  chunk that failed three of four questions; splitting fixed all of them.
+- **Relevance floor.** Similarity is model-specific. On
+  `nvidia/nemotron-3-embed-1b` correct matches score 0.15–0.43 and unrelated
+  passages ≤0.03 — a textbook 0.7 threshold rejects everything. Re-measure if
+  you change `NVIDIA_EMBED_MODEL`; the floor is `EMBED_RELEVANCE_FLOOR`.
+
+Without an embedder (no key, or the endpoint is down) documents still index
+and search by keyword, marked as such in the UI. Retrieved passages go to the
+planner, every specialist and the synthesizer, and the run shows which
+documents it is reading.
+
+Note that of the seven embedding models in this account's NVIDIA catalog on
+2026-09-12, six answered 404 or 410 — same trap as the chat models. Validate
+with a real call.
 
 ### Schedules
 

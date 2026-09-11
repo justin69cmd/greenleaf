@@ -9,6 +9,7 @@ import { planTasks } from './agent/planner.js'
 import { executeRun } from './agent/run.js'
 import { fireSchedule, isDue, runDueSchedules, startScheduler } from './agent/scheduler.js'
 import { extractEvents, markClashes, windowFor } from './agent/calendar.js'
+import { ingest, passageBlock, retrieve, MAX_DOC_CHARS } from './agent/documents.js'
 import { accessTokenFor, insertEvent, listEvents, type CalendarEvent } from './google.js'
 import { getClarifyingQuestions } from './agent/clarify.js'
 import { verifyLLMKey } from './agent/llm.js'
@@ -237,6 +238,77 @@ app.post('/auth/logout', (req, res) => {
   const header = req.headers.authorization
   revokeToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined)
   res.json({ ok: true })
+})
+
+// ── Documents ────────────────────────────────────────────────────────────────
+// Upload a syllabus, notes, a reading list — the planner then works from the
+// customer's own material instead of guessing. Files are parsed and indexed on
+// upload; the raw file is never stored.
+
+// Raw body, capped. PDFs are binary, so this cannot be JSON.
+const documentUpload = express.raw({ type: '*/*', limit: '8mb' })
+
+app.post('/documents', documentUpload, async (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+
+  const filename = String(req.query.name ?? 'document.txt').replace(/[^\w.\- ]/g, '_')
+  const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0)
+  if (!buffer.length) {
+    res.status(400).json({ error: 'That upload was empty.' })
+    return
+  }
+  if (db.countDocuments(owner.id) >= 25) {
+    res.status(400).json({ error: 'That is as many documents as one account can hold (25).' })
+    return
+  }
+
+  try {
+    res.json(await ingest(owner.id, filename, buffer))
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+app.get('/documents', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  res.json({
+    maxChars: MAX_DOC_CHARS,
+    documents: db.listDocuments(owner.id).map((d) => ({
+      id: d.id,
+      name: d.name,
+      kind: d.kind,
+      chars: d.chars,
+      chunks: d.chunks,
+      indexedAs: d.indexed_as,
+      createdAt: d.created_at,
+    })),
+  })
+})
+
+app.delete('/documents/:id', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  const ok = db.deleteDocument(Number(req.params.id), owner.id)
+  res.status(ok ? 200 : 404).json(ok ? { ok } : { error: 'Document not found.' })
+})
+
+/** Search your own documents — also useful on its own, not just inside a run. */
+app.post('/documents/search', async (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  const query = String((req.body ?? {}).query ?? '').trim()
+  if (!query) {
+    res.status(400).json({ error: 'What are you looking for?' })
+    return
+  }
+  try {
+    const passages = await retrieve(owner.id, query, 6)
+    res.json({ passages })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
 })
 
 // ── Calendar ─────────────────────────────────────────────────────────────────
@@ -706,17 +778,38 @@ wss.on('connection', (ws: WebSocket, req) => {
   // Aborts the run in flight when the user cancels.
   let runController: AbortController | null = null
 
-  /** Look up related past work and tell the client what was remembered. */
-  function loadMemory(goal: string): void {
+  /**
+   * Gather context for this goal: related past runs, and passages from the
+   * customer's own uploaded documents. Both go into the same block, which the
+   * planner, every specialist and the synthesizer all see.
+   */
+  async function loadMemory(goal: string): Promise<void> {
     memoryBlock = ''
     if (!user) return
+
     const memories = recall(user, goal)
-    if (!memories.length) return
-    memoryBlock = recallBlock(memories)
-    send({
-      type: 'memory',
-      payload: memories.map((m) => ({ runId: m.runId, title: m.title, when: m.when })),
-    })
+    if (memories.length) {
+      memoryBlock = recallBlock(memories)
+      send({
+        type: 'memory',
+        payload: memories.map((m) => ({ runId: m.runId, title: m.title, when: m.when })),
+      })
+    }
+
+    const account = db.findUser(user)
+    if (!account) return
+    try {
+      const passages = await retrieve(account.id, goal)
+      if (!passages.length) return
+      memoryBlock += passageBlock(passages)
+      send({
+        type: 'documents',
+        payload: passages.map((p) => ({ name: p.docName, score: Math.round(p.score * 100) / 100 })),
+      })
+    } catch (err) {
+      // Document search is an enhancement; a run must not fail because of it.
+      console.warn('[documents] retrieval failed:', err)
+    }
   }
 
   // Run the approved/clarified plan and deliver the result. The pipeline
@@ -795,7 +888,7 @@ wss.on('connection', (ws: WebSocket, req) => {
           pending = { goal, title: goal, delivery, email }
           lastDelivery = delivery
           lastEmail = email
-          loadMemory(goal)
+          await loadMemory(goal)
 
           if (data.skipClarify) {
             await proposePlan()
@@ -839,7 +932,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             ? `Earlier you produced this result:\n${lastSummary.slice(0, 800)}\n\nThe user now asks: ${fg}\nUse the earlier result as context.`
             : fg
           send({ type: 'log', payload: 'Working on your follow-up…' })
-          loadMemory(fg)
+          await loadMemory(fg)
           const tasks = await planTasks(goal, memoryBlock)
           await runAndDeliver(goal, fg, lastDelivery, lastEmail, tasks)
           break

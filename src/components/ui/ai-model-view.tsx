@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { AnimatePresence } from 'framer-motion'
-import { X, Paperclip, ArrowUp, Mic, RotateCcw, Copy, Check, History, Square, Brain, CalendarPlus } from 'lucide-react'
+import { X, Paperclip, ArrowUp, Mic, RotateCcw, Copy, Check, History, Square, Brain, CalendarPlus, FileText } from 'lucide-react'
 import SwarmGraph, { type SwarmTask } from '@/components/ui/swarm-graph'
 import UsageMeter, { type Usage } from '@/components/ui/usage-meter'
 import ArtifactCard from '@/components/ui/artifact-card'
@@ -255,6 +255,8 @@ export default function AIModelView({
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [usage, setUsage] = useState<Usage>(EMPTY_USAGE)
   const [recalled, setRecalled] = useState<Recalled[]>([])
+  // Passages from the user's own uploads that this run is drawing on.
+  const [sources, setSources] = useState<{ name: string; score: number }[]>([])
   // The answer as it is being written, shown live and then replaced by the
   // finished message when agent_done lands.
   const [draft, setDraft] = useState('')
@@ -444,6 +446,9 @@ export default function AIModelView({
         case 'memory':
           setRecalled((msg.payload as Recalled[]) ?? [])
           break
+        case 'documents':
+          setSources((msg.payload as { name: string; score: number }[]) ?? [])
+          break
         case 'cancelled':
           cancelledRef.current = true
           pushAssistant('⏹ Stopped. Nothing further was run.')
@@ -467,6 +472,7 @@ export default function AIModelView({
           pushAssistant(p?.summary ?? 'Done.', p?.files?.length ? p.files : filesRef.current)
           if (p?.usage) setUsage(p.usage)
           setDraft('')
+          setSources([])
           setStatus('')
           setTasks([])
           setStopping(false)
@@ -901,6 +907,18 @@ export default function AIModelView({
                         <span>
                           Building on {recalled.length} earlier run{recalled.length === 1 ? '' : 's'}:{' '}
                           <span className="text-sky-100/90">{recalled.map((r) => r.title).join(' · ')}</span>
+                        </span>
+                      </div>
+                    )}
+
+                    {sources.length > 0 && (
+                      <div className="mb-3 flex items-start gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.07] px-2.5 py-2 text-[12px] text-emerald-200/80">
+                        <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Reading your{' '}
+                          <span className="text-emerald-100/90">
+                            {Array.from(new Set(sources.map((s) => s.name))).join(' · ')}
+                          </span>
                         </span>
                       </div>
                     )}

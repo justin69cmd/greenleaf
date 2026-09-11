@@ -232,6 +232,65 @@ export async function removeRun(token: string, id: string): Promise<void> {
   await runsFetch(`/runs/${encodeURIComponent(id)}`, token, { method: 'DELETE' })
 }
 
+// ── Documents ─────────────────────────────────────────────────────────────────
+// Upload your own material — a syllabus, notes, a reading list — and plans are
+// built from what is actually in it. Files are indexed on upload; the raw file
+// is never stored on the server.
+
+export interface UserDocument {
+  id: number
+  name: string
+  kind: string
+  chars: number
+  chunks: number
+  /** 'embedded' = searched by meaning, 'keyword' = the embedder was unavailable. */
+  indexedAs: string
+  createdAt: number
+}
+
+export interface Passage {
+  docId: number
+  docName: string
+  ordinal: number
+  text: string
+  score: number
+}
+
+export async function fetchDocuments(token: string): Promise<UserDocument[]> {
+  const data = await runsFetch<{ documents: UserDocument[] }>('/documents', token)
+  return data.documents ?? []
+}
+
+export async function uploadDocument(
+  token: string,
+  file: File
+): Promise<{ id: number; name: string; chunks: number; indexedAs: string; note?: string }> {
+  const res = await fetch(`${API_URL}/documents?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': file.type || 'application/octet-stream',
+    },
+    body: file,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error((data as { error?: string }).error || 'Could not read that file.')
+  return data as { id: number; name: string; chunks: number; indexedAs: string; note?: string }
+}
+
+export function deleteDocument(token: string, id: number): Promise<{ ok: boolean }> {
+  return runsFetch<{ ok: boolean }>(`/documents/${id}`, token, { method: 'DELETE' })
+}
+
+export async function searchDocuments(token: string, query: string): Promise<Passage[]> {
+  const data = await runsFetch<{ passages: Passage[] }>('/documents/search', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  })
+  return data.passages ?? []
+}
+
 // ── Calendar ──────────────────────────────────────────────────────────────────
 // Extraction proposes; only `addCalendarEvents` writes, and it is only ever
 // called after the person has seen the list and confirmed it.

@@ -195,6 +195,33 @@ CREATE TABLE IF NOT EXISTS schedules (
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_user ON schedules(user_id);
 
+-- A document the customer uploaded, so plans can be grounded in their own
+-- material (a syllabus, a reading list, meeting notes).
+CREATE TABLE IF NOT EXISTS documents (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT    NOT NULL,
+  kind       TEXT    NOT NULL,
+  chars      INTEGER NOT NULL,
+  chunks     INTEGER NOT NULL DEFAULT 0,
+  /** 'embedded' when vectors exist, 'keyword' when the embedder was unavailable. */
+  indexed_as TEXT    NOT NULL DEFAULT 'keyword',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id);
+
+-- One passage of a document, with its vector. SQLite has no vector type, so
+-- the embedding is the raw float32 buffer; similarity is computed in process.
+CREATE TABLE IF NOT EXISTS doc_chunks (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  doc_id     INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ordinal    INTEGER NOT NULL,
+  text       TEXT    NOT NULL,
+  embedding  BLOB
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_user ON doc_chunks(user_id);
+
 -- Audit trail: every attempt at every layer, successful or not.
 CREATE TABLE IF NOT EXISTS login_events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +235,15 @@ CREATE TABLE IF NOT EXISTS login_events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_user ON login_events(user_id, id DESC);
 `
+
+/** Columns added after a table first shipped. SQLite can append nullable ones. */
+const ADDED_COLUMNS: [table: string, column: string, definition: string][] = [
+  // Calendar write-back: the long-lived grant, and when it was given.
+  ['users', 'google_refresh_token', 'TEXT'],
+  ['users', 'calendar_connected_at', 'TEXT'],
+  // What a round trip to Google was for: signing in, or asking for calendar access.
+  ['oauth_states', 'purpose', "TEXT NOT NULL DEFAULT 'signin'"],
+]
 
 function open(): Database.Database {
   try {
@@ -226,15 +262,6 @@ db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
 db.exec(SCHEMA)
 migrate()
-
-/** Columns added after a table first shipped. SQLite can append nullable ones. */
-const ADDED_COLUMNS: [table: string, column: string, definition: string][] = [
-  // Calendar write-back: the long-lived grant, and when it was given.
-  ['users', 'google_refresh_token', 'TEXT'],
-  ['users', 'calendar_connected_at', 'TEXT'],
-  // What a round trip to Google was for: signing in, or asking for calendar access.
-  ['oauth_states', 'purpose', "TEXT NOT NULL DEFAULT 'signin'"],
-]
 
 function addMissingColumns(): void {
   for (const [table, column, definition] of ADDED_COLUMNS) {
@@ -649,6 +676,95 @@ export function revokeCalendarGrant(userId: number): void {
   db.prepare(
     'UPDATE users SET google_refresh_token = NULL, calendar_connected_at = NULL WHERE id = ?'
   ).run(userId)
+}
+
+// ── Documents ─────────────────────────────────────────────────────────────────
+
+export interface DocumentRow {
+  id: number
+  user_id: number
+  name: string
+  kind: string
+  chars: number
+  chunks: number
+  indexed_as: string
+  created_at: number
+}
+
+export interface ChunkRow {
+  id: number
+  doc_id: number
+  user_id: number
+  ordinal: number
+  text: string
+  embedding: Buffer | null
+}
+
+export function createDocument(input: {
+  userId: number
+  name: string
+  kind: string
+  chars: number
+}): DocumentRow {
+  const info = db
+    .prepare(
+      'INSERT INTO documents (user_id, name, kind, chars, created_at) VALUES (@userId, @name, @kind, @chars, @createdAt)'
+    )
+    .run({ ...input, createdAt: Date.now() })
+  return db
+    .prepare<[number], DocumentRow>('SELECT * FROM documents WHERE id = ?')
+    .get(Number(info.lastInsertRowid))!
+}
+
+/** Write a document's passages in one transaction — a half-indexed doc is worse than none. */
+export const saveChunks = db.transaction(
+  (
+    docId: number,
+    userId: number,
+    chunks: { text: string; embedding: Buffer | null }[],
+    indexedAs: 'embedded' | 'keyword'
+  ) => {
+    const insert = db.prepare(
+      'INSERT INTO doc_chunks (doc_id, user_id, ordinal, text, embedding) VALUES (?, ?, ?, ?, ?)'
+    )
+    chunks.forEach((c, i) => insert.run(docId, userId, i, c.text, c.embedding))
+    db.prepare('UPDATE documents SET chunks = ?, indexed_as = ? WHERE id = ?').run(
+      chunks.length,
+      indexedAs,
+      docId
+    )
+  }
+)
+
+export function listDocuments(userId: number): DocumentRow[] {
+  return db
+    .prepare<[number], DocumentRow>('SELECT * FROM documents WHERE user_id = ? ORDER BY id DESC')
+    .all(userId)
+}
+
+export function deleteDocument(id: number, userId: number): boolean {
+  // Chunks cascade, but be explicit: foreign_keys can be off on an old file.
+  db.prepare('DELETE FROM doc_chunks WHERE doc_id = ? AND user_id = ?').run(id, userId)
+  return db.prepare('DELETE FROM documents WHERE id = ? AND user_id = ?').run(id, userId).changes > 0
+}
+
+/** Every passage this account owns, with its document's name. */
+export function chunksForUser(userId: number): (ChunkRow & { doc_name: string })[] {
+  return db
+    .prepare<[number], ChunkRow & { doc_name: string }>(
+      `SELECT c.*, d.name AS doc_name
+         FROM doc_chunks c JOIN documents d ON d.id = c.doc_id
+        WHERE c.user_id = ?`
+    )
+    .all(userId)
+}
+
+export function countDocuments(userId: number): number {
+  return (
+    db
+      .prepare<[number], { n: number }>('SELECT COUNT(*) AS n FROM documents WHERE user_id = ?')
+      .get(userId)?.n ?? 0
+  )
 }
 
 // ── Schedules ─────────────────────────────────────────────────────────────────

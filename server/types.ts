@@ -66,6 +66,8 @@ export type WSMessageType =
   | 'answer_delta'
   | 'usage'
   | 'memory'
+  // Passages pulled from the customer's uploaded documents for this goal.
+  | 'documents'
   | 'run_saved'
 
 export interface WSMessage {

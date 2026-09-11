@@ -2,6 +2,7 @@ import * as db from '../db.js'
 import { planTasks } from './planner.js'
 import { executeRun } from './run.js'
 import { recall, recallBlock } from './memory.js'
+import { passageBlock, retrieve } from './documents.js'
 import type { WSMessage } from '../types.js'
 
 // ── Recurring runs ────────────────────────────────────────────────────────────
@@ -85,8 +86,16 @@ export async function fireSchedule(row: db.ScheduleRow): Promise<{ runId?: strin
   }
 
   try {
+    // Same context a typed run gets: related past runs, plus the customer's
+    // own documents.
     const memories = recall(owner.email, row.goal)
-    const memoryBlock = memories.length ? recallBlock(memories) : undefined
+    let memoryBlock = memories.length ? recallBlock(memories) : ''
+    try {
+      const passages = await retrieve(owner.id, row.goal)
+      if (passages.length) memoryBlock += passageBlock(passages)
+    } catch (err) {
+      console.warn('[documents] retrieval failed for schedule:', err)
+    }
     const tasks = await planTasks(row.goal, memoryBlock)
     const outcome = await executeRun({
       goal: row.goal,
@@ -95,7 +104,7 @@ export async function fireSchedule(row: db.ScheduleRow): Promise<{ runId?: strin
       user: owner.email,
       delivery: row.delivery,
       email: row.email || owner.email,
-      memoryBlock,
+      memoryBlock: memoryBlock || undefined,
       send: sink,
     })
     const status = outcome.emailOk === false ? `sent, but email failed: ${outcome.emailInfo}` : 'done'
