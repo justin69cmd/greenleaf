@@ -1,4 +1,3 @@
-import { PDFParse } from 'pdf-parse'
 import * as db from '../db.js'
 import { cosine, embed, embeddingsConfigured, fromBlob, toBlob } from './embeddings.js'
 
@@ -107,6 +106,18 @@ export async function extractText(
 ): Promise<{ text: string; kind: string }> {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.pdf')) {
+    // Loaded on demand, never at boot. pdf-parse pulls in pdfjs, which wants
+    // browser globals (DOMMatrix and friends) that some Node runtimes do not
+    // provide — importing it at module scope took the whole server down on
+    // Vercel, including routes that have nothing to do with PDFs.
+    let PDFParse: typeof import('pdf-parse').PDFParse
+    try {
+      ;({ PDFParse } = await import('pdf-parse'))
+    } catch (err) {
+      throw new Error(
+        `PDF reading is not available on this server (${err instanceof Error ? err.message : String(err)}). Paste the text, or upload it as .txt or .md.`
+      )
+    }
     const parser = new PDFParse({ data: new Uint8Array(buffer) })
     try {
       const result = await parser.getText()
