@@ -2,7 +2,13 @@ import crypto from 'crypto'
 import path from 'path'
 import { mailConfigured, otpEmail, sendMail } from './mailer.js'
 import * as db from './db.js'
-import { authorizeUrl, exchangeCode, googleConfigured, newPkcePair } from './google.js'
+import {
+  authorizeUrl,
+  calendarAuthorizeUrl,
+  exchangeCode,
+  googleConfigured,
+  newPkcePair,
+} from './google.js'
 import { safeReturnUrl } from './origins.js'
 import {
   generateRecoveryCodes,
@@ -427,8 +433,23 @@ export function beginGoogleSignIn(returnUrl?: string): string {
   }
   const state = crypto.randomBytes(18).toString('hex')
   const { verifier, challenge } = newPkcePair()
-  db.saveOAuthState(state, verifier, safeReturnUrl(returnUrl))
+  db.saveOAuthState(state, verifier, safeReturnUrl(returnUrl), 'signin')
   return authorizeUrl(state, challenge)
+}
+
+/**
+ * Ask for calendar access. Separate from sign-in on purpose: the permission is
+ * requested when the customer wants their plan written to their calendar, not
+ * bundled into the act of logging in.
+ */
+export function beginCalendarConnect(returnUrl?: string): string {
+  if (!googleConfigured()) {
+    throw new Error('Google is not configured on this server.')
+  }
+  const state = crypto.randomBytes(18).toString('hex')
+  const { verifier, challenge } = newPkcePair()
+  db.saveOAuthState(state, verifier, safeReturnUrl(returnUrl), 'calendar')
+  return calendarAuthorizeUrl(state, challenge)
 }
 
 export interface GoogleCallbackResult {
@@ -453,6 +474,31 @@ export async function completeGoogleCallback(
   const identity = await exchangeCode(code, saved.code_verifier)
   if (!identity.emailVerified) {
     reject('Google has not verified that email address.', 'google', identity.email, ctx)
+  }
+
+  // Coming back from the calendar consent screen: store the grant against the
+  // account that owns this email and send them straight back, still signed in.
+  if (saved.purpose === 'calendar') {
+    const account = db.findUser(identity.email)
+    if (!account) {
+      reject('Sign in first, then connect your calendar.', 'calendar', identity.email, ctx)
+    }
+    if (!identity.refreshToken) {
+      reject(
+        'Google did not return a lasting calendar permission. Remove GreenLeaf at myaccount.google.com/permissions and try again.',
+        'calendar',
+        identity.email,
+        ctx,
+        account.id
+      )
+    }
+    db.saveCalendarGrant(account.id, identity.refreshToken)
+    audit('calendar', 'success', account.email, ctx, 'calendar access granted', account.id)
+    const handoff = crypto.randomBytes(24).toString('hex')
+    db.saveHandoff(handoff, { stage: null, calendarConnected: true } as StageResult & {
+      calendarConnected: boolean
+    })
+    return { returnUrl: saved.return_url, handoff }
   }
 
   let user = db.findUserByGoogleSub(identity.sub)
@@ -599,6 +645,8 @@ export interface AccountStatus {
   googleLinked: boolean
   /** False for Google-only accounts — they turn the authenticator off with a code. */
   hasPassword: boolean
+  /** Calendar write access has been granted. */
+  calendarConnected: boolean
   avatarUrl: string | null
   recentActivity: { stage: string; outcome: string; ip: string | null; at: string }[]
 }
@@ -615,6 +663,7 @@ export function accountStatus(email: string): AccountStatus {
     lastLoginAt: user.last_login_at,
     googleLinked: Boolean(user.google_sub),
     hasPassword: Boolean(user.password_hash),
+    calendarConnected: Boolean(user.google_refresh_token),
     avatarUrl: user.avatar_url,
     recentActivity: db.recentLoginEvents(user.id, 5).map((e) => ({
       stage: e.stage,

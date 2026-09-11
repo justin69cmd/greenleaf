@@ -8,6 +8,8 @@ import cors from 'cors'
 import { planTasks } from './agent/planner.js'
 import { executeRun } from './agent/run.js'
 import { fireSchedule, isDue, runDueSchedules, startScheduler } from './agent/scheduler.js'
+import { extractEvents, markClashes, windowFor } from './agent/calendar.js'
+import { accessTokenFor, insertEvent, listEvents, type CalendarEvent } from './google.js'
 import { getClarifyingQuestions } from './agent/clarify.js'
 import { verifyLLMKey } from './agent/llm.js'
 import { verifyMail } from './mailer.js'
@@ -18,6 +20,7 @@ import {
   beginGoogleSignIn,
   completeGoogleCallback,
   redeemHandoff,
+  beginCalendarConnect,
   isGoogleEnabled,
   resendOtp,
   verifyEmailOtp,
@@ -234,6 +237,113 @@ app.post('/auth/logout', (req, res) => {
   const header = req.headers.authorization
   revokeToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined)
   res.json({ ok: true })
+})
+
+// ── Calendar ─────────────────────────────────────────────────────────────────
+// Two steps, always: /calendar/extract proposes events from a plan, and
+// /calendar/events writes the ones the customer confirmed. Nothing reaches a
+// real calendar without that second, explicit call.
+
+app.get('/calendar/connect', authLimiter, (req, res) => {
+  // The session token rides in the query because this is a top-level browser
+  // navigation, not a fetch — it is exchanged for the account immediately.
+  if (!userFromRequest(req)) {
+    res.status(401).json({ error: 'Sign in first.' })
+    return
+  }
+  try {
+    const returnUrl = typeof req.query.redirect === 'string' ? req.query.redirect : undefined
+    res.redirect(beginCalendarConnect(returnUrl))
+  } catch (err) {
+    authFail(res, err)
+  }
+})
+
+app.post('/calendar/disconnect', (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  db.revokeCalendarGrant(owner.id)
+  res.json({ calendarConnected: false })
+})
+
+/** Propose events from a run's answer. Read-only: writes nothing anywhere. */
+app.post('/calendar/extract', async (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  const body = (req.body ?? {}) as { runId?: string; text?: string; today?: string; timeZone?: string }
+
+  const plan = body.runId ? getRun(body.runId, owner.email)?.summary : body.text
+  if (!plan?.trim()) {
+    res.status(400).json({ error: 'Nothing to put in the calendar.' })
+    return
+  }
+
+  try {
+    const today = body.today && /^\d{4}-\d{2}-\d{2}$/.test(body.today)
+      ? body.today
+      : new Date().toISOString().slice(0, 10)
+    const events = await extractEvents(plan, today)
+    const timeZone = String(body.timeZone || 'UTC')
+
+    // Warn about collisions, but only if the calendar is already connected —
+    // extraction must work before anyone grants anything.
+    let proposed = events.map((e) => e as ReturnType<typeof markClashes>[number])
+    const window = windowFor(events, timeZone)
+    if (owner.google_refresh_token && window) {
+      try {
+        const token = await accessTokenFor(owner.google_refresh_token)
+        proposed = markClashes(events, await listEvents(token, window.min, window.max), timeZone)
+      } catch {
+        /* busy-time lookup is advisory — never block the proposal on it */
+      }
+    }
+    res.json({ events: proposed, calendarConnected: Boolean(owner.google_refresh_token) })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+/** Write the confirmed events. Only ever called after the customer reviews them. */
+app.post('/calendar/events', async (req, res) => {
+  const owner = ownerRow(req, res)
+  if (!owner) return
+  if (!owner.google_refresh_token) {
+    res.status(400).json({ error: 'Connect your Google Calendar first.' })
+    return
+  }
+  const body = (req.body ?? {}) as { events?: CalendarEvent[]; timeZone?: string }
+  const events = (body.events ?? []).slice(0, 12)
+  if (!events.length) {
+    res.status(400).json({ error: 'No events to add.' })
+    return
+  }
+
+  try {
+    const token = await accessTokenFor(owner.google_refresh_token)
+    const timeZone = String(body.timeZone || 'UTC')
+    const created: { title: string; link: string }[] = []
+    const failed: { title: string; error: string }[] = []
+
+    for (const event of events) {
+      try {
+        const made = await insertEvent(token, event, timeZone)
+        created.push({ title: event.title, link: made.htmlLink })
+      } catch (err) {
+        failed.push({ title: event.title, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
+    db.recordLoginEvent({
+      userId: owner.id,
+      email: owner.email,
+      ip: req.ip ?? null,
+      stage: 'calendar_write',
+      outcome: failed.length ? 'failure' : 'success',
+      detail: `${created.length} added, ${failed.length} failed`,
+    })
+    res.json({ created, failed })
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
 })
 
 // ── Schedules ────────────────────────────────────────────────────────────────

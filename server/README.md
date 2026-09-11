@@ -88,6 +88,10 @@ the synthesizer as context. The client is told what was recalled.
 | `PATCH/DELETE` | `/schedules/:id` | Pause/resume or delete one |
 | `POST` | `/schedules/:id/run` | Run one now, ignoring the clock |
 | `POST` | `/schedules/tick` | Cron entry point (needs `CRON_SECRET`) |
+| `GET` | `/calendar/connect` | Ask Google for calendar write access |
+| `POST` | `/calendar/extract` | Propose events from a plan (writes nothing) |
+| `POST` | `/calendar/events` | Write the confirmed events |
+| `POST` | `/calendar/disconnect` | Forget the calendar grant |
 | `POST/DELETE` | `/runs/:id/share` | Publish a run behind a link, or revoke it |
 | `GET` | `/shares` | Links this account has published |
 | `GET` | `/shared/:token` | Read a shared run (no session — the link is the credential) |
@@ -204,6 +208,28 @@ app → POST /auth/handoff { code }
   `ALLOWED_ORIGINS`, localhost outside production) — no open redirect.
 - Unconfigured is a supported state: `/auth/config` reports `google: false` and
   the button is not rendered. See `server/.env.example` for the console setup.
+
+### Google Calendar
+
+A plan is only useful if it ends up somewhere real, so a finished answer can be
+turned into calendar events. Two steps, always:
+
+```
+POST /calendar/extract   → proposes events from a run's answer. Writes nothing.
+POST /calendar/events    → writes the ones the customer ticked.
+```
+
+`agent/calendar.ts` asks the model for wall-clock times relative to a stated
+"today" (it has no clock of its own), keeps only things that actually happen at
+a time, and drops advice. Proposed times are timezone-naive because that is
+what the customer means; comparing them against existing bookings resolves them
+in the *customer's* zone, not the server's — otherwise a clash check on a UTC
+server is wrong for everyone else. Verified across Kolkata, New York and a
+Denver DST boundary.
+
+Calendar permission is asked for separately from sign-in (incremental auth,
+`access_type=offline`), only when someone wants it, and the refresh token is
+stored on the user row. Revoking in Settings deletes it.
 
 ### Two-layer sign-in
 

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Check, Copy, ShieldCheck, ShieldOff } from 'lucide-react'
+import { CalendarCheck, CalendarPlus, Check, Copy, ShieldCheck, ShieldOff } from 'lucide-react'
 import CodeInput from '@/components/ui/code-input'
 import {
+  connectCalendarUrl,
   disableTotp,
+  disconnectCalendar,
   enableTotp,
   fetchAccount,
   startTotpSetup,
@@ -211,6 +213,44 @@ export default function TwoFactorSettings({ token }: { token: string }) {
       )}
 
       {error && <p className="mt-2 text-xs text-red-400/90">{error}</p>}
+
+      <div className="mt-3 border-t border-white/10 pt-3">
+        <div className="flex items-start gap-2.5">
+          {status.calendarConnected ? (
+            <CalendarCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+          ) : (
+            <CalendarPlus className="mt-0.5 h-4 w-4 shrink-0 text-neutral-500" />
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-white">Google Calendar</p>
+            <p className="mt-0.5 text-xs text-neutral-400">
+              {status.calendarConnected
+                ? 'Connected — plans can be added as events.'
+                : 'Not connected. Connect it to turn a plan into real calendar events.'}
+            </p>
+          </div>
+        </div>
+        {status.calendarConnected ? (
+          <button
+            onClick={() =>
+              void run(async () => {
+                await disconnectCalendar(token)
+                setStatus((s) => (s ? { ...s, calendarConnected: false } : s))
+              })
+            }
+            className="mt-2 w-full rounded-lg border border-white/10 bg-white/5 py-2 text-xs text-neutral-300 transition-colors hover:border-white/25 hover:text-white"
+          >
+            Disconnect calendar
+          </button>
+        ) : (
+          <a
+            href={connectCalendarUrl(token)}
+            className="mt-2 block w-full rounded-lg border border-white/10 bg-white/5 py-2 text-center text-xs text-neutral-300 transition-colors hover:border-emerald-400/40 hover:text-white"
+          >
+            Connect Google Calendar
+          </a>
+        )}
+      </div>
     </div>
   )
 }

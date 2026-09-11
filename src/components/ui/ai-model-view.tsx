@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { AnimatePresence } from 'framer-motion'
-import { X, Paperclip, ArrowUp, Mic, RotateCcw, Copy, Check, History, Square, Brain } from 'lucide-react'
+import { X, Paperclip, ArrowUp, Mic, RotateCcw, Copy, Check, History, Square, Brain, CalendarPlus } from 'lucide-react'
 import SwarmGraph, { type SwarmTask } from '@/components/ui/swarm-graph'
 import UsageMeter, { type Usage } from '@/components/ui/usage-meter'
 import ArtifactCard from '@/components/ui/artifact-card'
+import CalendarSheet from '@/components/ui/calendar-sheet'
 import RunHistory from '@/components/ui/run-history'
 import { WS_URL, type RunDetail } from '@/api'
 
@@ -257,6 +258,8 @@ export default function AIModelView({
   // The answer as it is being written, shown live and then replaced by the
   // finished message when agent_done lands.
   const [draft, setDraft] = useState('')
+  // The answer being turned into calendar events, if any.
+  const [calendarFor, setCalendarFor] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [token] = useState(loadToken)
@@ -854,6 +857,17 @@ export default function AIModelView({
                         </div>
                       ))}
                       {m.files && m.files.length > 0 && <ArtifactCard files={m.files} />}
+
+                      {/* Plans are only useful if they end up somewhere real. */}
+                      {loadToken() && !m.text.startsWith('⚠️') && !m.text.startsWith('⏹') && (
+                        <button
+                          onClick={() => setCalendarFor(m.text)}
+                          className="mt-1 flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 transition-colors hover:border-emerald-400/40 hover:text-white"
+                        >
+                          <CalendarPlus className="h-3.5 w-3.5" />
+                          Add to calendar
+                        </button>
+                      )}
                     </div>
                   </div>
                 )
@@ -932,6 +946,13 @@ export default function AIModelView({
             <div className="mx-auto w-full max-w-2xl">{inputBox}</div>
           </div>
         </div>
+      )}
+      {calendarFor && (
+        <CalendarSheet
+          token={loadToken()}
+          text={calendarFor}
+          onClose={() => setCalendarFor(null)}
+        />
       )}
     </div>
   )

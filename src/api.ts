@@ -134,6 +134,7 @@ export interface AccountStatus {
   googleLinked: boolean
   /** False for Google-only accounts: they confirm with an authenticator code. */
   hasPassword: boolean
+  calendarConnected: boolean
   avatarUrl: string | null
   recentActivity: { stage: string; outcome: string; ip: string | null; at: string }[]
 }
@@ -229,6 +230,57 @@ export async function fetchRun(token: string, id: string): Promise<RunDetail> {
 
 export async function removeRun(token: string, id: string): Promise<void> {
   await runsFetch(`/runs/${encodeURIComponent(id)}`, token, { method: 'DELETE' })
+}
+
+// ── Calendar ──────────────────────────────────────────────────────────────────
+// Extraction proposes; only `addCalendarEvents` writes, and it is only ever
+// called after the person has seen the list and confirmed it.
+
+export interface CalendarEvent {
+  title: string
+  start: string
+  end: string
+  notes?: string
+}
+
+export interface ProposedEvent extends CalendarEvent {
+  clashes?: { title: string; start: string; end: string }[]
+}
+
+export function connectCalendarUrl(token: string): string {
+  const back = window.location.origin + window.location.pathname
+  return `${API_URL}/calendar/connect?token=${encodeURIComponent(token)}&redirect=${encodeURIComponent(back)}`
+}
+
+export function disconnectCalendar(token: string): Promise<{ calendarConnected: false }> {
+  return runsFetch<{ calendarConnected: false }>('/calendar/disconnect', token, { method: 'POST' })
+}
+
+/** Ask what in this plan looks like a calendar event. Writes nothing. */
+export function extractCalendarEvents(
+  token: string,
+  input: { runId?: string; text?: string }
+): Promise<{ events: ProposedEvent[]; calendarConnected: boolean }> {
+  return runsFetch<{ events: ProposedEvent[]; calendarConnected: boolean }>('/calendar/extract', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...input,
+      today: new Date().toLocaleDateString('en-CA'),
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }),
+  })
+}
+
+export function addCalendarEvents(
+  token: string,
+  events: CalendarEvent[]
+): Promise<{ created: { title: string; link: string }[]; failed: { title: string; error: string }[] }> {
+  return runsFetch('/calendar/events', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ events, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+  })
 }
 
 // ── Schedules ─────────────────────────────────────────────────────────────────

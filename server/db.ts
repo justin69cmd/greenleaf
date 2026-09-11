@@ -35,6 +35,9 @@ export interface UserRow {
   /** Google's stable user id ("sub"), set once an account is linked. */
   google_sub: string | null
   avatar_url: string | null
+  /** Refresh token for calendar writes. Only present once explicitly granted. */
+  google_refresh_token: string | null
+  calendar_connected_at: string | null
   totp_secret: string | null
   pending_totp_secret: string | null
   totp_enabled: number
@@ -80,6 +83,9 @@ CREATE TABLE IF NOT EXISTS users (
   email_verified      INTEGER NOT NULL DEFAULT 0,
   google_sub          TEXT    UNIQUE,
   avatar_url          TEXT,
+  -- Long-lived grant for writing to the customer's calendar, once they allow it.
+  google_refresh_token TEXT,
+  calendar_connected_at TEXT,
   totp_secret         TEXT,
   pending_totp_secret TEXT,
   totp_enabled        INTEGER NOT NULL DEFAULT 0,
@@ -128,6 +134,7 @@ CREATE TABLE IF NOT EXISTS oauth_states (
   state         TEXT PRIMARY KEY,
   code_verifier TEXT NOT NULL,
   return_url    TEXT NOT NULL,
+  purpose       TEXT NOT NULL DEFAULT 'signin',
   created_at    INTEGER NOT NULL
 );
 
@@ -220,9 +227,28 @@ db.pragma('foreign_keys = ON')
 db.exec(SCHEMA)
 migrate()
 
+/** Columns added after a table first shipped. SQLite can append nullable ones. */
+const ADDED_COLUMNS: [table: string, column: string, definition: string][] = [
+  // Calendar write-back: the long-lived grant, and when it was given.
+  ['users', 'google_refresh_token', 'TEXT'],
+  ['users', 'calendar_connected_at', 'TEXT'],
+  // What a round trip to Google was for: signing in, or asking for calendar access.
+  ['oauth_states', 'purpose', "TEXT NOT NULL DEFAULT 'signin'"],
+]
+
+function addMissingColumns(): void {
+  for (const [table, column, definition] of ADDED_COLUMNS) {
+    const columns = db.prepare(`PRAGMA table_info('${table}')`).all() as { name: string }[]
+    if (columns.length === 0 || columns.some((c) => c.name === column)) continue
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    console.log(`🗄️  Added ${table}.${column}`)
+  }
+}
+
 // Bring a database created before Google sign-in up to the current shape.
 // SQLite cannot relax a NOT NULL in place, so the users table is rebuilt.
 function migrate(): void {
+  addMissingColumns()
   const columns = db.prepare("PRAGMA table_info('users')").all() as { name: string }[]
   if (columns.some((c) => c.name === 'google_sub')) return
 
@@ -238,6 +264,8 @@ function migrate(): void {
         email_verified      INTEGER NOT NULL DEFAULT 0,
         google_sub          TEXT    UNIQUE,
         avatar_url          TEXT,
+        google_refresh_token TEXT,
+        calendar_connected_at TEXT,
         totp_secret         TEXT,
         pending_totp_secret TEXT,
         totp_enabled        INTEGER NOT NULL DEFAULT 0,
@@ -457,19 +485,24 @@ export function sweep(challengeTtlMs: number): void {
 
 // ── Google sign-in: round-trip state and one-time handoffs ───────────────────
 
-export function saveOAuthState(state: string, codeVerifier: string, returnUrl: string): void {
+export function saveOAuthState(
+  state: string,
+  codeVerifier: string,
+  returnUrl: string,
+  purpose: 'signin' | 'calendar' = 'signin'
+): void {
   db.prepare(
-    'INSERT INTO oauth_states (state, code_verifier, return_url, created_at) VALUES (?, ?, ?, ?)'
-  ).run(state, codeVerifier, returnUrl, Date.now())
+    'INSERT INTO oauth_states (state, code_verifier, return_url, purpose, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(state, codeVerifier, returnUrl, purpose, Date.now())
 }
 
 /** Read a state and delete it in one go — a state is good for exactly one callback. */
 export function takeOAuthState(
   state: string
-): { code_verifier: string; return_url: string; created_at: number } | undefined {
+): { code_verifier: string; return_url: string; purpose: string; created_at: number } | undefined {
   const row = db
-    .prepare<[string], { code_verifier: string; return_url: string; created_at: number }>(
-      'SELECT code_verifier, return_url, created_at FROM oauth_states WHERE state = ?'
+    .prepare<[string], { code_verifier: string; return_url: string; purpose: string; created_at: number }>(
+      'SELECT code_verifier, return_url, purpose, created_at FROM oauth_states WHERE state = ?'
     )
     .get(state)
   if (row) db.prepare('DELETE FROM oauth_states WHERE state = ?').run(state)
@@ -603,6 +636,19 @@ export function deleteComment(id: number, ownerId: number): boolean {
       )
       .run(id, ownerId).changes > 0
   )
+}
+
+/** Store the long-lived calendar grant. Google only sends it on first consent. */
+export function saveCalendarGrant(userId: number, refreshToken: string): void {
+  db.prepare(
+    "UPDATE users SET google_refresh_token = ?, calendar_connected_at = datetime('now') WHERE id = ?"
+  ).run(refreshToken, userId)
+}
+
+export function revokeCalendarGrant(userId: number): void {
+  db.prepare(
+    'UPDATE users SET google_refresh_token = NULL, calendar_connected_at = NULL WHERE id = ?'
+  ).run(userId)
 }
 
 // ── Schedules ─────────────────────────────────────────────────────────────────
