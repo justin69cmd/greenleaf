@@ -184,13 +184,34 @@ finish until email works.
 
 ### Customer database
 
-Accounts live in a SQLite file — `server/data/greenleaf.db` by default
-(`/tmp/greenleaf.db` on Vercel, the only writable path there), overridable with
-`DATABASE_FILE`. **On a serverless host accounts do not persist**: each instance
-gets its own copy and `/tmp` is wiped. Deploy to a host with a real disk, or
-move the store to Postgres, before real customers sign up. The schema is created on first boot
-(`server/db.ts`), and a pre-existing `users.json` is imported once and renamed
-to `users.json.migrated`.
+Accounts live in SQLite, reached through libSQL (`server/db.ts`):
+
+- **Production — Turso.** Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` on the
+  backend. Every serverless instance talks to the same database, which is what
+  lets a sign-in started on one instance finish on another.
+- **Local — a file.** With the Turso variables unset, `server/data/greenleaf.db`
+  is used (override with `DATABASE_FILE`).
+
+If the backend runs on Vercel without Turso, it boots with a loud
+`DATABASE NOT SHARED` warning: each instance then has its own `/tmp` file, and
+sign-ins fail at random. The schema is created and migrated on first use, and a
+pre-existing `users.json` is imported once and renamed to `users.json.migrated`.
+
+Setting up Turso (needs the [Turso CLI](https://docs.turso.tech/cli/installation)):
+
+```bash
+turso db create greenleaf
+turso db show greenleaf --url
+turso db tokens create greenleaf
+```
+
+Put the URL and token in `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` in the
+greenleaf-backend Vercel project (and in `server/.env` to point local work at
+it), then redeploy. To seed Turso from an existing local file instead, create
+the database with `turso db create greenleaf --from-file server/data/greenleaf.db`.
+
+Foreign-key cascades are not relied on — a `PRAGMA` doesn't outlive a request
+over Turso's HTTP protocol — so deletes that should cascade are written out.
 
 | Table | What it holds |
 |-------|---------------|

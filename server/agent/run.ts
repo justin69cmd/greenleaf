@@ -6,6 +6,7 @@ import { sendPdfEmail } from './tools.js'
 import { UsageMeter, runWithMeter } from './usage.js'
 import { isCancelled } from './cancellation.js'
 import { saveRun, newRunId } from './store.js'
+import { runInWorkspace, workspaceFor } from './workspace.js'
 import type { DeliveryMode, RunRecord, Task, WSMessage } from '../types.js'
 
 // ── One run, start to finish ──────────────────────────────────────────────────
@@ -81,7 +82,8 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome> {
   }
 
   try {
-    return await runWithMeter(meter, async () => {
+    // Files the specialists save land in this account's own workspace.
+    return await runInWorkspace(workspaceFor(user, runId), () => runWithMeter(meter, async () => {
       send({ type: 'plan', payload: tasks })
 
       await runSwarm({ goal, tasks, send: track, signal: opts.signal, memoryBlock })
@@ -135,7 +137,7 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome> {
         payload: { runId, goal: title, tasks, summary, files, usage: meter.snapshot(), delivery },
       })
       return { runId, summary, status: 'done' as const, files }
-    })
+    }))
   } catch (err) {
     if (isCancelled(err)) {
       // No summary: a cancelled run produced no answer, and carrying the

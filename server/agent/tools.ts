@@ -1,10 +1,9 @@
 import fs from 'fs/promises'
 import path from 'path'
-import { exec } from 'child_process'
-import { promisify } from 'util'
 import { sendMail } from '../mailer.js'
-
-const execAsync = promisify(exec)
+import { currentWorkspace, resolveInside } from './workspace.js'
+import { runSandboxed } from './sandbox.js'
+import { BlockedUrlError, publicFetch } from './net-guard.js'
 
 export type ToolResult = { success: boolean; output: string }
 
@@ -115,11 +114,10 @@ export async function webSearch(query: string): Promise<ToolResult> {
 // ── 2. Write File ─────────────────────────────────────────────────────────────
 export async function writeFile(filePath: string, content: string): Promise<ToolResult> {
   try {
-    // Confine writes to the workspace — absolute paths and ../ escapes are
-    // rejected (the path comes from the LLM, not a trusted caller).
-    const base = path.resolve('./agent_workspace')
-    const safePath = path.resolve(base, filePath.replace(/^[/\\]+/, ''))
-    if (safePath !== base && !safePath.startsWith(base + path.sep)) {
+    // Confine writes to this run's workspace — absolute paths and ../ escapes
+    // are rejected (the path comes from the LLM, not a trusted caller).
+    const safePath = resolveInside(currentWorkspace(), filePath)
+    if (!safePath) {
       return { success: false, output: `Write failed: path escapes the workspace (${filePath})` }
     }
     await fs.mkdir(path.dirname(safePath), { recursive: true })
@@ -138,18 +136,21 @@ export async function callApi(
   body?: unknown
 ): Promise<ToolResult> {
   try {
-    const res = await fetch(url, {
+    // Same public-address rule as read_url: the URL is model-chosen.
+    const { res } = await publicFetch(url, {
       method,
       headers: { 'Content-Type': 'application/json', ...headers },
       body: body === undefined || body === null
         ? undefined
         : (typeof body === 'string' ? body : JSON.stringify(body)),
+      signal: AbortSignal.timeout(15_000),
     })
     const text = await res.text()
     let parsed: unknown
     try { parsed = JSON.parse(text) } catch { parsed = text }
     return { success: res.ok, output: JSON.stringify(parsed, null, 2).slice(0, 2000) }
   } catch (err) {
+    if (err instanceof BlockedUrlError) return { success: false, output: `API call refused: ${err.message}` }
     return { success: false, output: `API call failed: ${String(err)}` }
   }
 }
@@ -183,18 +184,10 @@ export async function sendPdfEmail(
 }
 
 // ── 5. Run Code ───────────────────────────────────────────────────────────────
+// Model-written code runs in a locked-down child process — see sandbox.ts.
 export async function runCode(code: string): Promise<ToolResult> {
-  try {
-    const tmpFile = `./agent_workspace/_tmp_${Date.now()}.mjs`
-    await fs.mkdir('./agent_workspace', { recursive: true })
-    await fs.writeFile(tmpFile, code, 'utf8')
-    const { stdout, stderr } = await execAsync(`node ${tmpFile}`, { timeout: 10000, maxBuffer: 10 * 1024 * 1024 })
-    await fs.unlink(tmpFile).catch(() => {})
-    return { success: true, output: stdout || stderr || '(no output)' }
-  } catch (err: unknown) {
-    const e = err as { stdout?: string; stderr?: string; message?: string }
-    return { success: false, output: e.stderr ?? e.message ?? String(err) }
-  }
+  const result = await runSandboxed(code)
+  return { success: result.ok, output: result.output }
 }
 
 // ── 6. Read URL ───────────────────────────────────────────────────────────────
@@ -207,42 +200,18 @@ export async function readUrl(url: string): Promise<ToolResult> {
     const target = url?.trim()
     if (!target) return { success: false, output: 'No URL provided' }
 
-    // The URL comes from the LLM (often lifted out of a search result), so
-    // restrict it to public http(s) and refuse loopback/private hosts — an
-    // agent must not be able to reach the machine's own services.
+    // The URL comes from the LLM (often lifted out of a search result), so it
+    // must resolve to a public address on every hop — see net-guard.ts.
+    let res: Response
     let parsed: URL
     try {
-      parsed = new URL(target)
-    } catch {
-      return { success: false, output: `Not a valid URL: ${target}` }
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return { success: false, output: 'Only http(s) URLs can be read.' }
-    }
-    const host = parsed.hostname.toLowerCase()
-    const isPrivate =
-      host === 'localhost' ||
-      host.endsWith('.localhost') ||
-      host.endsWith('.internal') ||
-      /^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(host) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-      host === '::1' ||
-      host === '[::1]'
-    if (isPrivate) {
-      return { success: false, output: 'Refusing to read a private/loopback address.' }
-    }
-
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 15_000)
-    let res: Response
-    try {
-      res = await fetch(parsed.toString(), {
+      ;({ res, url: parsed } = await publicFetch(target, {
         headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9' },
-        signal: controller.signal,
-        redirect: 'follow',
-      })
-    } finally {
-      clearTimeout(timer)
+        signal: AbortSignal.timeout(15_000),
+      }))
+    } catch (err) {
+      if (err instanceof BlockedUrlError) return { success: false, output: err.message }
+      throw err
     }
     if (!res.ok) return { success: false, output: `Fetch failed: HTTP ${res.status} for ${parsed.host}` }
 
@@ -282,7 +251,8 @@ export async function readUrl(url: string): Promise<ToolResult> {
     const truncated = clean.length > READ_URL_CAP ? '\n\n[…truncated]' : ''
     return { success: true, output: `${header}\n\n${body}${truncated}` }
   } catch (err) {
-    const aborted = (err as { name?: string })?.name === 'AbortError'
+    const name = (err as { name?: string })?.name
+    const aborted = name === 'AbortError' || name === 'TimeoutError'
     return { success: false, output: aborted ? 'Fetch timed out after 15s.' : `Read failed: ${String(err)}` }
   }
 }
@@ -290,14 +260,12 @@ export async function readUrl(url: string): Promise<ToolResult> {
 // ── 7. Read / list workspace files ────────────────────────────────────────────
 // Lets a later specialist pick up what an earlier one saved, instead of every
 // hand-off having to travel through the (capped) conversation context.
-const WORKSPACE = () => path.resolve('./agent_workspace')
-
-/** Resolve a workspace-relative path, or null if it escapes the workspace. */
+/** Resolve a workspace-relative path, or null if it escapes this run's workspace. */
 function safeWorkspacePath(rel: string): string | null {
-  const base = WORKSPACE()
-  const resolved = path.resolve(base, String(rel ?? '').replace(/^[/\\]+/, ''))
-  if (resolved !== base && !resolved.startsWith(base + path.sep)) return null
-  return resolved
+  const base = currentWorkspace()
+  const clean = String(rel ?? '').trim()
+  if (!clean || clean === '.' || clean === './' || clean === '/') return base
+  return resolveInside(base, clean)
 }
 
 const READ_FILE_CAP = 4000

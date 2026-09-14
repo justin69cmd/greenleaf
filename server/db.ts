@@ -1,25 +1,41 @@
 import fs from 'fs'
 import path from 'path'
-import Database from 'better-sqlite3'
+import { createClient, type Client, type InArgs, type InStatement, type Row } from '@libsql/client'
 
 // ── Customer database ─────────────────────────────────────────────────────────
 // Everything the sign-in flow needs to remember lives here: the account itself,
 // its recovery codes, the sessions handed out to it, in-flight sign-in
 // challenges, and an audit trail of every attempt.
 //
-// SQLite because it needs no server of its own and the whole database is one
-// file you can copy or open with any SQL tool. On a read-only host (serverless)
-// we fall back to an in-memory database so the app still boots — accounts just
-// won't survive the process.
+// It is SQLite either way, through libSQL:
+//   TURSO_DATABASE_URL (+ TURSO_AUTH_TOKEN) → a hosted Turso database. Every
+//       server instance talks to the same one, which is what serverless needs:
+//       a sign-in started on one Vercel instance must be finishable on another.
+//   otherwise → a local file (data/greenleaf.db), for development.
+//
+// A local file on Vercel lives in that instance's /tmp and dies with it, so the
+// server says so loudly at boot rather than letting sign-ins fail at random.
+//
+// Foreign keys are not relied on: over Turso's HTTP protocol a PRAGMA doesn't
+// outlive its request, so every delete that should cascade does so explicitly.
 
-// On Vercel the project directory is read-only and only /tmp is writable, so
-// default there instead of falling all the way back to an in-memory database.
-// Either way a serverless instance keeps its own copy: accounts written on one
-// instance are not visible to the next. A host with a real disk (or Postgres)
-// is what makes them stick.
+const TURSO_URL = process.env.TURSO_DATABASE_URL?.trim()
 const DB_FILE =
   process.env.DATABASE_FILE ??
   (process.env.VERCEL ? '/tmp/greenleaf.db' : path.resolve('./data/greenleaf.db'))
+
+/** Where the data lives, for boot logs and the customers script. Never includes the token. */
+export const location = TURSO_URL ? `Turso (${TURSO_URL.replace(/^[a-z]+:\/\//, '').split('/')[0]})` : DB_FILE
+
+function open(): Client {
+  if (TURSO_URL) {
+    return createClient({ url: TURSO_URL, authToken: process.env.TURSO_AUTH_TOKEN?.trim() || undefined })
+  }
+  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true })
+  return createClient({ url: `file:${DB_FILE}` })
+}
+
+const client = open()
 
 export type Stage = 'email_otp' | 'totp'
 export type Purpose = 'login' | 'signup'
@@ -245,44 +261,113 @@ const ADDED_COLUMNS: [table: string, column: string, definition: string][] = [
   ['oauth_states', 'purpose', "TEXT NOT NULL DEFAULT 'signin'"],
 ]
 
-function open(): Database.Database {
-  try {
-    fs.mkdirSync(path.dirname(DB_FILE), { recursive: true })
-    const database = new Database(DB_FILE)
-    console.log(`🗄️  Customer database: ${DB_FILE}`)
-    return database
-  } catch (err) {
-    console.warn(`[db] ${DB_FILE} is not writable (${String(err)}) — using an in-memory database.`)
-    return new Database(':memory:')
+// Schema and migrations run once, before the first query. Every helper awaits
+// this, so callers never see a half-initialised database. A failure is not
+// cached: if Turso is unreachable for a moment at boot, the next request tries
+// again instead of the instance being dead until it is recycled.
+let initialising: Promise<void> | null = null
+
+async function init(): Promise<void> {
+  if (!TURSO_URL) {
+    // Local file only: wait for a lock rather than failing (two dev servers on one file).
+    await client.execute('PRAGMA busy_timeout = 5000')
+    await client.execute('PRAGMA journal_mode = WAL')
+  }
+  await client.executeMultiple(SCHEMA)
+  await migrate()
+  console.log(`🗄️  Customer database: ${location}`)
+  if (!TURSO_URL && process.env.VERCEL) {
+    console.error(
+      '🗄️  DATABASE NOT SHARED — this is a per-instance file in /tmp. Sign-ins will fail at random ' +
+        'and accounts will disappear. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.'
+    )
   }
 }
 
-const db = open()
-db.pragma('journal_mode = WAL')
-db.pragma('foreign_keys = ON')
-db.exec(SCHEMA)
-migrate()
+/** Resolves once the schema is in place; rejects if the database can't be reached. */
+export function dbReady(): Promise<void> {
+  initialising ??= init().catch((err) => {
+    initialising = null
+    throw err
+  })
+  return initialising
+}
 
-function addMissingColumns(): void {
+// libSQL rows carry column names as enumerable keys; BLOBs arrive as
+// ArrayBuffer, and the rest of the app expects Buffer.
+function plain<T>(row: Row): T {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = value instanceof ArrayBuffer ? Buffer.from(value) : value
+  }
+  return out as T
+}
+
+/**
+ * A database that can't be reached surfaces as a network error ("fetch failed").
+ * Callers show error messages to customers, so log the real cause and hand back
+ * a sentence. SQL errors (a constraint, a typo) pass through untouched.
+ */
+function friendly(err: unknown): Error {
+  const code = (err as { code?: string })?.code ?? ''
+  if (err instanceof Error && (code.startsWith('SQLITE_') || code === 'SQL_INPUT_ERROR')) return err
+  console.error(`[db] ${location} unreachable:`, err)
+  return new Error('Our account service is unavailable right now. Please try again in a moment.')
+}
+
+async function all<T>(sql: string, args: InArgs = []): Promise<T[]> {
+  try {
+    await dbReady()
+    const result = await client.execute({ sql, args })
+    return result.rows.map((r) => plain<T>(r))
+  } catch (err) {
+    throw friendly(err)
+  }
+}
+
+async function get<T>(sql: string, args: InArgs = []): Promise<T | undefined> {
+  return (await all<T>(sql, args))[0]
+}
+
+/** Run a write; resolves to the number of rows it changed. */
+async function run(sql: string, args: InArgs = []): Promise<number> {
+  try {
+    await dbReady()
+    return (await client.execute({ sql, args })).rowsAffected
+  } catch (err) {
+    throw friendly(err)
+  }
+}
+
+/** Several statements, atomically, in one round trip. */
+async function atomically(statements: InStatement[]) {
+  try {
+    await dbReady()
+    return await client.batch(statements, 'write')
+  } catch (err) {
+    throw friendly(err)
+  }
+}
+
+async function addMissingColumns(): Promise<void> {
   for (const [table, column, definition] of ADDED_COLUMNS) {
-    const columns = db.prepare(`PRAGMA table_info('${table}')`).all() as { name: string }[]
+    const columns = (await client.execute(`PRAGMA table_info('${table}')`)).rows
     if (columns.length === 0 || columns.some((c) => c.name === column)) continue
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    await client.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
     console.log(`🗄️  Added ${table}.${column}`)
   }
 }
 
 // Bring a database created before Google sign-in up to the current shape.
 // SQLite cannot relax a NOT NULL in place, so the users table is rebuilt.
-function migrate(): void {
-  addMissingColumns()
-  const columns = db.prepare("PRAGMA table_info('users')").all() as { name: string }[]
+async function migrate(): Promise<void> {
+  await addMissingColumns()
+  const columns = (await client.execute("PRAGMA table_info('users')")).rows
   if (columns.some((c) => c.name === 'google_sub')) return
 
-  db.pragma('foreign_keys = OFF')
-  db.transaction(() => {
-    db.exec(`
-      CREATE TABLE users_new (
+  await client.batch(
+    [
+      `CREATE TABLE users_new (
         id                  INTEGER PRIMARY KEY AUTOINCREMENT,
         name                TEXT    NOT NULL,
         email               TEXT    NOT NULL UNIQUE COLLATE NOCASE,
@@ -298,40 +383,37 @@ function migrate(): void {
         totp_enabled        INTEGER NOT NULL DEFAULT 0,
         created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
         last_login_at       TEXT
-      );
-      INSERT INTO users_new
+      )`,
+      `INSERT INTO users_new
         (id, name, email, password_hash, password_salt, email_verified,
          totp_secret, pending_totp_secret, totp_enabled, created_at, last_login_at)
         SELECT id, name, email, password_hash, password_salt, email_verified,
                totp_secret, pending_totp_secret, totp_enabled, created_at, last_login_at
-          FROM users;
-      DROP TABLE users;
-      ALTER TABLE users_new RENAME TO users;
-    `)
-  })()
-  db.pragma('foreign_keys = ON')
+          FROM users`,
+      'DROP TABLE users',
+      'ALTER TABLE users_new RENAME TO users',
+    ],
+    'write'
+  )
   console.log('🗄️  Migrated users table for Google sign-in')
 }
 
-/** Escape hatch for one-off queries and tests. */
-export function raw(): Database.Database {
-  return db
+/** Escape hatch for one-off read queries and scripts. */
+export function query<T>(sql: string, args: InArgs = []): Promise<T[]> {
+  return all<T>(sql, args)
 }
 
 // ── Accounts ──────────────────────────────────────────────────────────────────
 
-const selectUserByEmail = db.prepare<[string], UserRow>('SELECT * FROM users WHERE email = ?')
-const selectUserById = db.prepare<[number], UserRow>('SELECT * FROM users WHERE id = ?')
-
-export function findUser(email: string): UserRow | undefined {
-  return selectUserByEmail.get(email)
+export function findUser(email: string): Promise<UserRow | undefined> {
+  return get<UserRow>('SELECT * FROM users WHERE email = ?', [email])
 }
 
-export function findUserById(id: number): UserRow | undefined {
-  return selectUserById.get(id)
+export function findUserById(id: number): Promise<UserRow | undefined> {
+  return get<UserRow>('SELECT * FROM users WHERE id = ?', [id])
 }
 
-export function createUser(input: {
+export async function createUser(input: {
   name: string
   email: string
   passwordHash?: string | null
@@ -339,15 +421,14 @@ export function createUser(input: {
   emailVerified: boolean
   googleSub?: string | null
   avatarUrl?: string | null
-}): UserRow {
-  const info = db
-    .prepare(
-      `INSERT INTO users
-         (name, email, password_hash, password_salt, email_verified, google_sub, avatar_url)
-       VALUES
-         (@name, @email, @passwordHash, @passwordSalt, @emailVerified, @googleSub, @avatarUrl)`
-    )
-    .run({
+}): Promise<UserRow> {
+  const row = await get<UserRow>(
+    `INSERT INTO users
+       (name, email, password_hash, password_salt, email_verified, google_sub, avatar_url)
+     VALUES
+       (@name, @email, @passwordHash, @passwordSalt, @emailVerified, @googleSub, @avatarUrl)
+     RETURNING *`,
+    {
       name: input.name,
       email: input.email,
       passwordHash: input.passwordHash ?? null,
@@ -355,125 +436,134 @@ export function createUser(input: {
       emailVerified: input.emailVerified ? 1 : 0,
       googleSub: input.googleSub ?? null,
       avatarUrl: input.avatarUrl ?? null,
-    })
-  return selectUserById.get(Number(info.lastInsertRowid))!
+    }
+  )
+  return row!
 }
 
 /** Look an account up by the Google id it was linked with. */
-export function findUserByGoogleSub(sub: string): UserRow | undefined {
-  return db.prepare<[string], UserRow>('SELECT * FROM users WHERE google_sub = ?').get(sub)
+export function findUserByGoogleSub(sub: string): Promise<UserRow | undefined> {
+  return get<UserRow>('SELECT * FROM users WHERE google_sub = ?', [sub])
 }
 
 /** Attach a Google identity to an existing account (same verified email). */
-export function linkGoogleAccount(
+export async function linkGoogleAccount(
   userId: number,
   googleSub: string,
   avatarUrl?: string | null
-): void {
-  db.prepare(
+): Promise<void> {
+  await run(
     `UPDATE users
         SET google_sub = ?, avatar_url = COALESCE(?, avatar_url), email_verified = 1
-      WHERE id = ?`
-  ).run(googleSub, avatarUrl ?? null, userId)
+      WHERE id = ?`,
+    [googleSub, avatarUrl ?? null, userId]
+  )
 }
 
-export function markEmailVerified(userId: number): void {
-  db.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').run(userId)
+export async function markEmailVerified(userId: number): Promise<void> {
+  await run('UPDATE users SET email_verified = 1 WHERE id = ?', [userId])
 }
 
-export function touchLastLogin(userId: number): void {
-  db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(userId)
+export async function touchLastLogin(userId: number): Promise<void> {
+  await run("UPDATE users SET last_login_at = datetime('now') WHERE id = ?", [userId])
 }
 
-export function setPendingTotpSecret(userId: number, secret: string | null): void {
-  db.prepare('UPDATE users SET pending_totp_secret = ? WHERE id = ?').run(secret, userId)
+export async function setPendingTotpSecret(userId: number, secret: string | null): Promise<void> {
+  await run('UPDATE users SET pending_totp_secret = ? WHERE id = ?', [secret, userId])
 }
 
 /** Confirm enrolment: promote the pending secret and replace the recovery codes. */
-export const enableTotpForUser = db.transaction(
-  (userId: number, secret: string, codeHashes: string[]) => {
-    db.prepare(
-      `UPDATE users
-          SET totp_secret = ?, pending_totp_secret = NULL, totp_enabled = 1
-        WHERE id = ?`
-    ).run(secret, userId)
-    db.prepare('DELETE FROM recovery_codes WHERE user_id = ?').run(userId)
-    const insert = db.prepare('INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)')
-    for (const hash of codeHashes) insert.run(userId, hash)
-  }
-)
+export async function enableTotpForUser(userId: number, secret: string, codeHashes: string[]): Promise<void> {
+  await atomically([
+    {
+      sql: `UPDATE users
+               SET totp_secret = ?, pending_totp_secret = NULL, totp_enabled = 1
+             WHERE id = ?`,
+      args: [secret, userId],
+    },
+    { sql: 'DELETE FROM recovery_codes WHERE user_id = ?', args: [userId] },
+    ...codeHashes.map((hash) => ({
+      sql: 'INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)',
+      args: [userId, hash],
+    })),
+  ])
+}
 
-export const disableTotpForUser = db.transaction((userId: number) => {
-  db.prepare(
-    `UPDATE users
-        SET totp_secret = NULL, pending_totp_secret = NULL, totp_enabled = 0
-      WHERE id = ?`
-  ).run(userId)
-  db.prepare('DELETE FROM recovery_codes WHERE user_id = ?').run(userId)
-})
+export async function disableTotpForUser(userId: number): Promise<void> {
+  await atomically([
+    {
+      sql: `UPDATE users
+               SET totp_secret = NULL, pending_totp_secret = NULL, totp_enabled = 0
+             WHERE id = ?`,
+      args: [userId],
+    },
+    { sql: 'DELETE FROM recovery_codes WHERE user_id = ?', args: [userId] },
+  ])
+}
 
 // ── Recovery codes ────────────────────────────────────────────────────────────
 
-export function countRecoveryCodes(userId: number): number {
-  const row = db
-    .prepare<[number], { n: number }>('SELECT COUNT(*) AS n FROM recovery_codes WHERE user_id = ?')
-    .get(userId)
+export async function countRecoveryCodes(userId: number): Promise<number> {
+  const row = await get<{ n: number }>('SELECT COUNT(*) AS n FROM recovery_codes WHERE user_id = ?', [userId])
   return row?.n ?? 0
 }
 
 /** Burn a recovery code. Returns false if it was never issued or already used. */
-export function consumeRecoveryCode(userId: number, codeHash: string): boolean {
-  const info = db
-    .prepare('DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?')
-    .run(userId, codeHash)
-  return info.changes > 0
+export async function consumeRecoveryCode(userId: number, codeHash: string): Promise<boolean> {
+  return (await run('DELETE FROM recovery_codes WHERE user_id = ? AND code_hash = ?', [userId, codeHash])) > 0
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
-export function createSession(userId: number, tokenHash: string, ttlMs: number): void {
+export async function createSession(userId: number, tokenHash: string, ttlMs: number): Promise<void> {
   const now = Date.now()
-  db.prepare(
+  await run(
     `INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(tokenHash, userId, now, now + ttlMs, now)
+     VALUES (?, ?, ?, ?, ?)`,
+    [tokenHash, userId, now, now + ttlMs, now]
+  )
 }
 
 /** Resolve a session token hash to its account email, refreshing last_seen_at. */
-export function emailForSession(tokenHash: string): string | null {
-  const row = db
-    .prepare<[string], { email: string; expires_at: number }>(
-      `SELECT u.email AS email, s.expires_at AS expires_at
-         FROM sessions s JOIN users u ON u.id = s.user_id
-        WHERE s.token_hash = ?`
-    )
-    .get(tokenHash)
+export async function emailForSession(tokenHash: string): Promise<string | null> {
+  // Every signed-in request lands here, so it is one round trip: refresh a live
+  // session and read it back together.
+  const now = Date.now()
+  const [, lookup] = await atomically([
+    { sql: 'UPDATE sessions SET last_seen_at = ? WHERE token_hash = ? AND expires_at >= ?', args: [now, tokenHash, now] },
+    {
+      sql: `SELECT u.email AS email, s.expires_at AS expires_at
+              FROM sessions s JOIN users u ON u.id = s.user_id
+             WHERE s.token_hash = ?`,
+      args: [tokenHash],
+    },
+  ])
+  const row = lookup.rows[0]
   if (!row) return null
-  if (row.expires_at < Date.now()) {
-    deleteSession(tokenHash)
+  if (Number(row.expires_at) < now) {
+    await deleteSession(tokenHash)
     return null
   }
-  db.prepare('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?').run(Date.now(), tokenHash)
-  return row.email
+  return String(row.email)
 }
 
-export function deleteSession(tokenHash: string): void {
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash)
+export async function deleteSession(tokenHash: string): Promise<void> {
+  await run('DELETE FROM sessions WHERE token_hash = ?', [tokenHash])
 }
 
 /** Sign every device out — used when the second factor changes. */
-export function deleteSessionsForUser(userId: number, except?: string): void {
+export async function deleteSessionsForUser(userId: number, except?: string): Promise<void> {
   if (except) {
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(userId, except)
+    await run('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', [userId, except])
   } else {
-    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
+    await run('DELETE FROM sessions WHERE user_id = ?', [userId])
   }
 }
 
 // ── Sign-in challenges ────────────────────────────────────────────────────────
 
-export function saveChallenge(row: ChallengeRow): void {
-  db.prepare(
+export async function saveChallenge(row: ChallengeRow): Promise<void> {
+  await run(
     `INSERT INTO login_challenges
        (id, email, name, purpose, stage, password, otp_hash, otp_expires,
         otp_attempts, otp_sent_at, resends, totp_attempts, created_at)
@@ -488,71 +578,68 @@ export function saveChallenge(row: ChallengeRow): void {
         otp_attempts = excluded.otp_attempts,
         otp_sent_at = excluded.otp_sent_at,
         resends = excluded.resends,
-        totp_attempts = excluded.totp_attempts`
-  ).run(row)
+        totp_attempts = excluded.totp_attempts`,
+    { ...row }
+  )
 }
 
-export function findChallenge(id: string): ChallengeRow | undefined {
-  return db.prepare<[string], ChallengeRow>('SELECT * FROM login_challenges WHERE id = ?').get(id)
+export function findChallenge(id: string): Promise<ChallengeRow | undefined> {
+  return get<ChallengeRow>('SELECT * FROM login_challenges WHERE id = ?', [id])
 }
 
-export function deleteChallenge(id: string): void {
-  db.prepare('DELETE FROM login_challenges WHERE id = ?').run(id)
+export async function deleteChallenge(id: string): Promise<void> {
+  await run('DELETE FROM login_challenges WHERE id = ?', [id])
 }
 
 /** Drop expired challenges and sessions. Cheap enough to call on every attempt. */
-export function sweep(challengeTtlMs: number): void {
+export async function sweep(challengeTtlMs: number): Promise<void> {
   const now = Date.now()
-  db.prepare('DELETE FROM login_challenges WHERE created_at < ?').run(now - challengeTtlMs)
-  db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now)
-  // A trip to Google and back is seconds; a handoff is swapped immediately.
-  db.prepare('DELETE FROM oauth_states WHERE created_at < ?').run(now - 10 * 60_000)
-  db.prepare('DELETE FROM auth_handoffs WHERE created_at < ?').run(now - 2 * 60_000)
+  await atomically([
+    { sql: 'DELETE FROM login_challenges WHERE created_at < ?', args: [now - challengeTtlMs] },
+    { sql: 'DELETE FROM sessions WHERE expires_at < ?', args: [now] },
+    // A trip to Google and back is seconds; a handoff is swapped immediately.
+    { sql: 'DELETE FROM oauth_states WHERE created_at < ?', args: [now - 10 * 60_000] },
+    { sql: 'DELETE FROM auth_handoffs WHERE created_at < ?', args: [now - 2 * 60_000] },
+  ])
 }
 
 // ── Google sign-in: round-trip state and one-time handoffs ───────────────────
 
-export function saveOAuthState(
+export async function saveOAuthState(
   state: string,
   codeVerifier: string,
   returnUrl: string,
   purpose: 'signin' | 'calendar' = 'signin'
-): void {
-  db.prepare(
-    'INSERT INTO oauth_states (state, code_verifier, return_url, purpose, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(state, codeVerifier, returnUrl, purpose, Date.now())
-}
-
-/** Read a state and delete it in one go — a state is good for exactly one callback. */
-export function takeOAuthState(
-  state: string
-): { code_verifier: string; return_url: string; purpose: string; created_at: number } | undefined {
-  const row = db
-    .prepare<[string], { code_verifier: string; return_url: string; purpose: string; created_at: number }>(
-      'SELECT code_verifier, return_url, purpose, created_at FROM oauth_states WHERE state = ?'
-    )
-    .get(state)
-  if (row) db.prepare('DELETE FROM oauth_states WHERE state = ?').run(state)
-  return row
-}
-
-export function saveHandoff(code: string, payload: unknown): void {
-  db.prepare('INSERT INTO auth_handoffs (code, payload, created_at) VALUES (?, ?, ?)').run(
-    code,
-    JSON.stringify(payload),
-    Date.now()
+): Promise<void> {
+  await run(
+    'INSERT INTO oauth_states (state, code_verifier, return_url, purpose, created_at) VALUES (?, ?, ?, ?, ?)',
+    [state, codeVerifier, returnUrl, purpose, Date.now()]
   )
 }
 
+/**
+ * Read a state and delete it in one statement — a state is good for exactly one
+ * callback, even when two instances receive the same callback at once.
+ */
+export function takeOAuthState(
+  state: string
+): Promise<{ code_verifier: string; return_url: string; purpose: string; created_at: number } | undefined> {
+  return get('DELETE FROM oauth_states WHERE state = ? RETURNING code_verifier, return_url, purpose, created_at', [
+    state,
+  ])
+}
+
+export async function saveHandoff(code: string, payload: unknown): Promise<void> {
+  await run('INSERT INTO auth_handoffs (code, payload, created_at) VALUES (?, ?, ?)', [
+    code,
+    JSON.stringify(payload),
+    Date.now(),
+  ])
+}
+
 /** Single use: the row is deleted as it is read. */
-export function takeHandoff(code: string): { payload: string; created_at: number } | undefined {
-  const row = db
-    .prepare<[string], { payload: string; created_at: number }>(
-      'SELECT payload, created_at FROM auth_handoffs WHERE code = ?'
-    )
-    .get(code)
-  if (row) db.prepare('DELETE FROM auth_handoffs WHERE code = ?').run(code)
-  return row
+export function takeHandoff(code: string): Promise<{ payload: string; created_at: number } | undefined> {
+  return get('DELETE FROM auth_handoffs WHERE code = ? RETURNING payload, created_at', [code])
 }
 
 // ── Sharing ───────────────────────────────────────────────────────────────────
@@ -576,106 +663,105 @@ export interface CommentRow {
   created_at: number
 }
 
-export function createShare(input: {
+export async function createShare(input: {
   token: string
   runId: string
   ownerId: number
   title: string
   allowComments: boolean
-}): SharedRunRow {
-  db.prepare(
+}): Promise<SharedRunRow> {
+  const row = await get<SharedRunRow>(
     `INSERT INTO shared_runs (token, run_id, owner_id, title, allow_comments, created_at)
      VALUES (@token, @runId, @ownerId, @title, @allowComments, @createdAt)
      ON CONFLICT(run_id) DO UPDATE SET
        allow_comments = excluded.allow_comments,
-       title = excluded.title`
-  ).run({
-    token: input.token,
-    runId: input.runId,
-    ownerId: input.ownerId,
-    title: input.title,
-    allowComments: input.allowComments ? 1 : 0,
-    createdAt: Date.now(),
-  })
-  return findShareByRun(input.runId)!
-}
-
-export function findShare(token: string): SharedRunRow | undefined {
-  return db.prepare<[string], SharedRunRow>('SELECT * FROM shared_runs WHERE token = ?').get(token)
-}
-
-export function findShareByRun(runId: string): SharedRunRow | undefined {
-  return db.prepare<[string], SharedRunRow>('SELECT * FROM shared_runs WHERE run_id = ?').get(runId)
-}
-
-export function listSharesForOwner(ownerId: number): SharedRunRow[] {
-  return db
-    .prepare<[number], SharedRunRow>('SELECT * FROM shared_runs WHERE owner_id = ? ORDER BY created_at DESC')
-    .all(ownerId)
-}
-
-export function deleteShare(runId: string, ownerId: number): boolean {
-  return (
-    db.prepare('DELETE FROM shared_runs WHERE run_id = ? AND owner_id = ?').run(runId, ownerId)
-      .changes > 0
+       title = excluded.title
+     RETURNING *`,
+    {
+      token: input.token,
+      runId: input.runId,
+      ownerId: input.ownerId,
+      title: input.title,
+      allowComments: input.allowComments ? 1 : 0,
+      createdAt: Date.now(),
+    }
   )
+  return row!
 }
 
-export function countShareView(token: string): void {
-  db.prepare('UPDATE shared_runs SET views = views + 1 WHERE token = ?').run(token)
+export function findShare(token: string): Promise<SharedRunRow | undefined> {
+  return get<SharedRunRow>('SELECT * FROM shared_runs WHERE token = ?', [token])
 }
 
-export function addComment(input: {
+export function findShareByRun(runId: string): Promise<SharedRunRow | undefined> {
+  return get<SharedRunRow>('SELECT * FROM shared_runs WHERE run_id = ?', [runId])
+}
+
+export function listSharesForOwner(ownerId: number): Promise<SharedRunRow[]> {
+  return all<SharedRunRow>('SELECT * FROM shared_runs WHERE owner_id = ? ORDER BY created_at DESC', [ownerId])
+}
+
+export async function deleteShare(runId: string, ownerId: number): Promise<boolean> {
+  // Comments go with the link (explicitly — see the note on foreign keys).
+  const [, removed] = await atomically([
+    {
+      sql: 'DELETE FROM run_comments WHERE token IN (SELECT token FROM shared_runs WHERE run_id = ? AND owner_id = ?)',
+      args: [runId, ownerId],
+    },
+    { sql: 'DELETE FROM shared_runs WHERE run_id = ? AND owner_id = ?', args: [runId, ownerId] },
+  ])
+  return removed.rowsAffected > 0
+}
+
+export async function countShareView(token: string): Promise<void> {
+  await run('UPDATE shared_runs SET views = views + 1 WHERE token = ?', [token])
+}
+
+export async function addComment(input: {
   token: string
   author: string
   userId?: number | null
   body: string
-}): CommentRow {
-  const info = db
-    .prepare(
-      'INSERT INTO run_comments (token, author, user_id, body, created_at) VALUES (@token, @author, @userId, @body, @createdAt)'
-    )
-    .run({
+}): Promise<CommentRow> {
+  const row = await get<CommentRow>(
+    `INSERT INTO run_comments (token, author, user_id, body, created_at)
+     VALUES (@token, @author, @userId, @body, @createdAt)
+     RETURNING *`,
+    {
       token: input.token,
       author: input.author,
       userId: input.userId ?? null,
       body: input.body,
       createdAt: Date.now(),
-    })
-  return db
-    .prepare<[number], CommentRow>('SELECT * FROM run_comments WHERE id = ?')
-    .get(Number(info.lastInsertRowid))!
-}
-
-export function listComments(token: string): CommentRow[] {
-  return db
-    .prepare<[string], CommentRow>('SELECT * FROM run_comments WHERE token = ? ORDER BY id')
-    .all(token)
-}
-
-export function deleteComment(id: number, ownerId: number): boolean {
-  // Only the run's owner can remove a comment from their shared run.
-  return (
-    db
-      .prepare(
-        `DELETE FROM run_comments
-          WHERE id = ? AND token IN (SELECT token FROM shared_runs WHERE owner_id = ?)`
-      )
-      .run(id, ownerId).changes > 0
+    }
   )
+  return row!
+}
+
+export function listComments(token: string): Promise<CommentRow[]> {
+  return all<CommentRow>('SELECT * FROM run_comments WHERE token = ? ORDER BY id', [token])
+}
+
+export async function deleteComment(id: number, ownerId: number): Promise<boolean> {
+  // Only the run's owner can remove a comment from their shared run.
+  const changed = await run(
+    `DELETE FROM run_comments
+      WHERE id = ? AND token IN (SELECT token FROM shared_runs WHERE owner_id = ?)`,
+    [id, ownerId]
+  )
+  return changed > 0
 }
 
 /** Store the long-lived calendar grant. Google only sends it on first consent. */
-export function saveCalendarGrant(userId: number, refreshToken: string): void {
-  db.prepare(
-    "UPDATE users SET google_refresh_token = ?, calendar_connected_at = datetime('now') WHERE id = ?"
-  ).run(refreshToken, userId)
+export async function saveCalendarGrant(userId: number, refreshToken: string): Promise<void> {
+  await run("UPDATE users SET google_refresh_token = ?, calendar_connected_at = datetime('now') WHERE id = ?", [
+    refreshToken,
+    userId,
+  ])
 }
 
-export function revokeCalendarGrant(userId: number): void {
-  db.prepare(
-    'UPDATE users SET google_refresh_token = NULL, calendar_connected_at = NULL WHERE id = ?'
-  ).run(userId)
+export async function revokeCalendarGrant(userId: number): Promise<void> {
+  await run('UPDATE users SET google_refresh_token = NULL, calendar_connected_at = NULL WHERE id = ?', [userId])
 }
 
 // ── Documents ─────────────────────────────────────────────────────────────────
@@ -700,71 +786,80 @@ export interface ChunkRow {
   embedding: Buffer | null
 }
 
-export function createDocument(input: {
+export async function createDocument(input: {
   userId: number
   name: string
   kind: string
   chars: number
-}): DocumentRow {
-  const info = db
-    .prepare(
-      'INSERT INTO documents (user_id, name, kind, chars, created_at) VALUES (@userId, @name, @kind, @chars, @createdAt)'
-    )
-    .run({ ...input, createdAt: Date.now() })
-  return db
-    .prepare<[number], DocumentRow>('SELECT * FROM documents WHERE id = ?')
-    .get(Number(info.lastInsertRowid))!
+}): Promise<DocumentRow> {
+  const row = await get<DocumentRow>(
+    `INSERT INTO documents (user_id, name, kind, chars, created_at)
+     VALUES (@userId, @name, @kind, @chars, @createdAt)
+     RETURNING *`,
+    { ...input, createdAt: Date.now() }
+  )
+  return row!
 }
+
+// A large document is hundreds of passages, each with a vector; one batch of
+// all of them can exceed what a single request to Turso should carry.
+const CHUNK_BATCH = 50
 
 /** Write a document's passages in one transaction — a half-indexed doc is worse than none. */
-export const saveChunks = db.transaction(
-  (
-    docId: number,
-    userId: number,
-    chunks: { text: string; embedding: Buffer | null }[],
-    indexedAs: 'embedded' | 'keyword'
-  ) => {
-    const insert = db.prepare(
-      'INSERT INTO doc_chunks (doc_id, user_id, ordinal, text, embedding) VALUES (?, ?, ?, ?, ?)'
-    )
-    chunks.forEach((c, i) => insert.run(docId, userId, i, c.text, c.embedding))
-    db.prepare('UPDATE documents SET chunks = ?, indexed_as = ? WHERE id = ?').run(
-      chunks.length,
-      indexedAs,
-      docId
-    )
+export async function saveChunks(
+  docId: number,
+  userId: number,
+  chunks: { text: string; embedding: Buffer | null }[],
+  indexedAs: 'embedded' | 'keyword'
+): Promise<void> {
+  await dbReady()
+  const tx = await client.transaction('write')
+  try {
+    for (let start = 0; start < chunks.length; start += CHUNK_BATCH) {
+      await tx.batch(
+        chunks.slice(start, start + CHUNK_BATCH).map((c, i) => ({
+          sql: 'INSERT INTO doc_chunks (doc_id, user_id, ordinal, text, embedding) VALUES (?, ?, ?, ?, ?)',
+          args: [docId, userId, start + i, c.text, c.embedding],
+        }))
+      )
+    }
+    await tx.execute({
+      sql: 'UPDATE documents SET chunks = ?, indexed_as = ? WHERE id = ?',
+      args: [chunks.length, indexedAs, docId],
+    })
+    await tx.commit()
+  } catch (err) {
+    await tx.rollback().catch(() => {})
+    throw err
+  } finally {
+    tx.close()
   }
-)
-
-export function listDocuments(userId: number): DocumentRow[] {
-  return db
-    .prepare<[number], DocumentRow>('SELECT * FROM documents WHERE user_id = ? ORDER BY id DESC')
-    .all(userId)
 }
 
-export function deleteDocument(id: number, userId: number): boolean {
-  // Chunks cascade, but be explicit: foreign_keys can be off on an old file.
-  db.prepare('DELETE FROM doc_chunks WHERE doc_id = ? AND user_id = ?').run(id, userId)
-  return db.prepare('DELETE FROM documents WHERE id = ? AND user_id = ?').run(id, userId).changes > 0
+export function listDocuments(userId: number): Promise<DocumentRow[]> {
+  return all<DocumentRow>('SELECT * FROM documents WHERE user_id = ? ORDER BY id DESC', [userId])
+}
+
+export async function deleteDocument(id: number, userId: number): Promise<boolean> {
+  const [, removed] = await atomically([
+    { sql: 'DELETE FROM doc_chunks WHERE doc_id = ? AND user_id = ?', args: [id, userId] },
+    { sql: 'DELETE FROM documents WHERE id = ? AND user_id = ?', args: [id, userId] },
+  ])
+  return removed.rowsAffected > 0
 }
 
 /** Every passage this account owns, with its document's name. */
-export function chunksForUser(userId: number): (ChunkRow & { doc_name: string })[] {
-  return db
-    .prepare<[number], ChunkRow & { doc_name: string }>(
-      `SELECT c.*, d.name AS doc_name
-         FROM doc_chunks c JOIN documents d ON d.id = c.doc_id
-        WHERE c.user_id = ?`
-    )
-    .all(userId)
+export function chunksForUser(userId: number): Promise<(ChunkRow & { doc_name: string })[]> {
+  return all<ChunkRow & { doc_name: string }>(
+    `SELECT c.*, d.name AS doc_name
+       FROM doc_chunks c JOIN documents d ON d.id = c.doc_id
+      WHERE c.user_id = ?`,
+    [userId]
+  )
 }
 
-export function countDocuments(userId: number): number {
-  return (
-    db
-      .prepare<[number], { n: number }>('SELECT COUNT(*) AS n FROM documents WHERE user_id = ?')
-      .get(userId)?.n ?? 0
-  )
+export async function countDocuments(userId: number): Promise<number> {
+  return (await get<{ n: number }>('SELECT COUNT(*) AS n FROM documents WHERE user_id = ?', [userId]))?.n ?? 0
 }
 
 // ── Schedules ─────────────────────────────────────────────────────────────────
@@ -788,7 +883,7 @@ export interface ScheduleRow {
   created_at: number
 }
 
-export function createSchedule(input: {
+export async function createSchedule(input: {
   userId: number
   title: string
   goal: string
@@ -799,93 +894,87 @@ export function createSchedule(input: {
   timezone: string
   delivery: string
   email: string
-}): ScheduleRow {
-  const info = db
-    .prepare(
-      `INSERT INTO schedules
-         (user_id, title, goal, cadence, weekday, hour, minute, timezone, delivery, email, created_at)
-       VALUES
-         (@userId, @title, @goal, @cadence, @weekday, @hour, @minute, @timezone, @delivery, @email, @createdAt)`
-    )
-    .run({ ...input, createdAt: Date.now() })
-  return findSchedule(Number(info.lastInsertRowid))!
+}): Promise<ScheduleRow> {
+  const row = await get<ScheduleRow>(
+    `INSERT INTO schedules
+       (user_id, title, goal, cadence, weekday, hour, minute, timezone, delivery, email, created_at)
+     VALUES
+       (@userId, @title, @goal, @cadence, @weekday, @hour, @minute, @timezone, @delivery, @email, @createdAt)
+     RETURNING *`,
+    { ...input, createdAt: Date.now() }
+  )
+  return row!
 }
 
-export function findSchedule(id: number): ScheduleRow | undefined {
-  return db.prepare<[number], ScheduleRow>('SELECT * FROM schedules WHERE id = ?').get(id)
+export function findSchedule(id: number): Promise<ScheduleRow | undefined> {
+  return get<ScheduleRow>('SELECT * FROM schedules WHERE id = ?', [id])
 }
 
-export function listSchedules(userId: number): ScheduleRow[] {
-  return db
-    .prepare<[number], ScheduleRow>('SELECT * FROM schedules WHERE user_id = ? ORDER BY id')
-    .all(userId)
+export function listSchedules(userId: number): Promise<ScheduleRow[]> {
+  return all<ScheduleRow>('SELECT * FROM schedules WHERE user_id = ? ORDER BY id', [userId])
 }
 
 /** Every schedule that could fire, across all accounts — the runner's input. */
-export function allEnabledSchedules(): ScheduleRow[] {
-  return db.prepare<[], ScheduleRow>('SELECT * FROM schedules WHERE enabled = 1').all()
+export function allEnabledSchedules(): Promise<ScheduleRow[]> {
+  return all<ScheduleRow>('SELECT * FROM schedules WHERE enabled = 1')
 }
 
-export function setScheduleEnabled(id: number, userId: number, enabled: boolean): boolean {
-  return (
-    db
-      .prepare('UPDATE schedules SET enabled = ? WHERE id = ? AND user_id = ?')
-      .run(enabled ? 1 : 0, id, userId).changes > 0
-  )
+export async function setScheduleEnabled(id: number, userId: number, enabled: boolean): Promise<boolean> {
+  return (await run('UPDATE schedules SET enabled = ? WHERE id = ? AND user_id = ?', [enabled ? 1 : 0, id, userId])) > 0
 }
 
-export function deleteSchedule(id: number, userId: number): boolean {
-  return db.prepare('DELETE FROM schedules WHERE id = ? AND user_id = ?').run(id, userId).changes > 0
+export async function deleteSchedule(id: number, userId: number): Promise<boolean> {
+  return (await run('DELETE FROM schedules WHERE id = ? AND user_id = ?', [id, userId])) > 0
 }
 
 /** Record the outcome of a fire, and the local date that claimed it. */
-export function markScheduleFired(
+export async function markScheduleFired(
   id: number,
   localDate: string,
   runId: string | null,
   status: string
-): void {
-  db.prepare(
-    'UPDATE schedules SET last_fired_on = ?, last_run_id = ?, last_status = ? WHERE id = ?'
-  ).run(localDate, runId, status, id)
+): Promise<void> {
+  await run('UPDATE schedules SET last_fired_on = ?, last_run_id = ?, last_status = ? WHERE id = ?', [
+    localDate,
+    runId,
+    status,
+    id,
+  ])
 }
 
 // ── Audit trail ───────────────────────────────────────────────────────────────
 
-export function recordLoginEvent(event: {
+export async function recordLoginEvent(event: {
   userId?: number | null
   email: string
   ip?: string | null
   stage: string
   outcome: 'success' | 'failure'
   detail?: string | null
-}): void {
-  db.prepare(
+}): Promise<void> {
+  await run(
     `INSERT INTO login_events (user_id, email, ip, stage, outcome, detail)
-     VALUES (@userId, @email, @ip, @stage, @outcome, @detail)`
-  ).run({
-    userId: event.userId ?? null,
-    email: event.email,
-    ip: event.ip ?? null,
-    stage: event.stage,
-    outcome: event.outcome,
-    detail: event.detail ?? null,
-  })
+     VALUES (@userId, @email, @ip, @stage, @outcome, @detail)`,
+    {
+      userId: event.userId ?? null,
+      email: event.email,
+      ip: event.ip ?? null,
+      stage: event.stage,
+      outcome: event.outcome,
+      detail: event.detail ?? null,
+    }
+  )
 }
 
-export function recentLoginEvents(userId: number, limit = 10): LoginEventRow[] {
-  return db
-    .prepare<[number, number], LoginEventRow>(
-      'SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT ?'
-    )
-    .all(userId, limit)
+export function recentLoginEvents(userId: number, limit = 10): Promise<LoginEventRow[]> {
+  return all<LoginEventRow>('SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT ?', [userId, limit])
 }
 
 // ── One-time import of the old users.json ─────────────────────────────────────
 // Accounts created before the database existed are copied in on first boot, and
 // the file is renamed so it never runs twice.
 
-export function importLegacyUsers(file: string): void {
+export async function importLegacyUsers(file: string): Promise<void> {
   if (!fs.existsSync(file)) return
   try {
     const legacy = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<
@@ -903,8 +992,8 @@ export function importLegacyUsers(file: string): void {
     >
     let imported = 0
     for (const [email, user] of Object.entries(legacy)) {
-      if (!user?.salt || !user?.hash || findUser(email)) continue
-      const row = createUser({
+      if (!user?.salt || !user?.hash || (await findUser(email))) continue
+      const row = await createUser({
         name: user.name || email.split('@')[0],
         email,
         passwordHash: user.hash,
@@ -912,7 +1001,7 @@ export function importLegacyUsers(file: string): void {
         emailVerified: user.emailVerified ?? true,
       })
       if (user.totpEnabled && user.totpSecret) {
-        enableTotpForUser(row.id, user.totpSecret, user.recoveryCodes ?? [])
+        await enableTotpForUser(row.id, user.totpSecret, user.recoveryCodes ?? [])
       }
       imported++
     }

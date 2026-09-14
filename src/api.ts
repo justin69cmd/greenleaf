@@ -498,7 +498,17 @@ export async function postSharedComment(
   return data as SharedComment
 }
 
-/** Download URL for a file an agent saved in the shared workspace. */
-export function fileUrl(relPath: string): string {
-  return `${API_URL}/files/${relPath.split('/').map(encodeURIComponent).join('/')}`
+/**
+ * Fetch a file an agent saved during one of your runs. Files are private to the
+ * account, so this has to carry the session token — which is why the UI can't
+ * just link to the URL.
+ */
+export async function fetchFile(relPath: string, token: string): Promise<Blob> {
+  const url = `${API_URL}/files/${relPath.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')}`
+  const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string }
+    throw new Error(data.error ?? `Download failed (${res.status})`)
+  }
+  return res.blob()
 }

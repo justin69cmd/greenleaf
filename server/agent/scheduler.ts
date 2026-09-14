@@ -72,13 +72,13 @@ export function isDue(row: db.ScheduleRow, now = new Date()): boolean {
 
 /** Run one schedule now, whatever the clock says. Used by the runner and "Run now". */
 export async function fireSchedule(row: db.ScheduleRow): Promise<{ runId?: string; status: string }> {
-  const owner = db.findUserById(row.user_id)
+  const owner = await db.findUserById(row.user_id)
   if (!owner) return { status: 'no such account' }
 
   const localDate = localParts(new Date(), row.timezone).date
   // Claim the slot before the work starts: a long run must not be started
   // twice by the next tick.
-  db.markScheduleFired(row.id, localDate, null, 'running')
+  await db.markScheduleFired(row.id, localDate, null, 'running')
 
   const log: string[] = []
   const sink = (msg: WSMessage) => {
@@ -108,12 +108,12 @@ export async function fireSchedule(row: db.ScheduleRow): Promise<{ runId?: strin
       send: sink,
     })
     const status = outcome.emailOk === false ? `sent, but email failed: ${outcome.emailInfo}` : 'done'
-    db.markScheduleFired(row.id, localDate, outcome.runId, status)
+    await db.markScheduleFired(row.id, localDate, outcome.runId, status)
     console.log(`⏰ Schedule "${row.title}" ran for ${owner.email} → ${status}`)
     return { runId: outcome.runId, status }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    db.markScheduleFired(row.id, localDate, null, `failed: ${message.slice(0, 200)}`)
+    await db.markScheduleFired(row.id, localDate, null, `failed: ${message.slice(0, 200)}`).catch(() => {})
     console.error(`⏰ Schedule "${row.title}" failed: ${message}`)
     return { status: `failed: ${message}` }
   }
@@ -121,7 +121,7 @@ export async function fireSchedule(row: db.ScheduleRow): Promise<{ runId?: strin
 
 /** One pass over every enabled schedule. Safe to call from a cron endpoint. */
 export async function runDueSchedules(now = new Date()): Promise<number> {
-  const due = db.allEnabledSchedules().filter((row) => isDue(row, now))
+  const due = (await db.allEnabledSchedules()).filter((row) => isDue(row, now))
   // Sequential on purpose: these share the account's model quota, and a
   // scheduled run is never in a hurry.
   for (const row of due) await fireSchedule(row)

@@ -158,7 +158,7 @@ export async function ingest(
   const pieces = chunk(text)
   if (!pieces.length) throw new Error('There is no readable text in that file.')
 
-  const doc = db.createDocument({ userId, name: filename.slice(0, 120), kind, chars: text.length })
+  const doc = await db.createDocument({ userId, name: filename.slice(0, 120), kind, chars: text.length })
 
   let vectors: Float32Array[] | null = null
   let note: string | undefined
@@ -175,12 +175,18 @@ export async function ingest(
   }
 
   const indexedAs = vectors ? 'embedded' : 'keyword'
-  db.saveChunks(
-    doc.id,
-    userId,
-    pieces.map((text, i) => ({ text, embedding: vectors ? toBlob(vectors[i]) : null })),
-    indexedAs
-  )
+  try {
+    await db.saveChunks(
+      doc.id,
+      userId,
+      pieces.map((text, i) => ({ text, embedding: vectors ? toBlob(vectors[i]) : null })),
+      indexedAs
+    )
+  } catch (err) {
+    // The passages roll back together; don't leave an empty document behind.
+    await db.deleteDocument(doc.id, userId).catch(() => {})
+    throw err
+  }
   return { id: doc.id, name: doc.name, chunks: pieces.length, indexedAs, ...(note ? { note } : {}) }
 }
 
@@ -218,7 +224,7 @@ function keywordScore(query: string, text: string): number {
  * to use it.
  */
 export async function retrieve(userId: number, goal: string, limit = 4): Promise<Passage[]> {
-  const rows = db.chunksForUser(userId)
+  const rows = await db.chunksForUser(userId)
   if (!rows.length) return []
 
   const embedded = rows.filter((r) => r.embedding)

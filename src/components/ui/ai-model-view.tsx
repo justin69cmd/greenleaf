@@ -862,7 +862,7 @@ export default function AIModelView({
                           {block}
                         </div>
                       ))}
-                      {m.files && m.files.length > 0 && <ArtifactCard files={m.files} />}
+                      {m.files && m.files.length > 0 && <ArtifactCard files={m.files} token={token} />}
 
                       {/* Plans are only useful if they end up somewhere real. */}
                       {loadToken() && !m.text.startsWith('⚠️') && !m.text.startsWith('⏹') && (

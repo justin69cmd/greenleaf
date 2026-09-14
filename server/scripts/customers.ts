@@ -1,4 +1,4 @@
-import { raw, recentLoginEvents, type UserRow } from '../db.js'
+import { location, query, recentLoginEvents, type UserRow } from '../db.js'
 
 // Read-only look at what the customer database holds.
 //   npm run db:customers            → every account
@@ -8,9 +8,11 @@ import { raw, recentLoginEvents, type UserRow } from '../db.js'
 
 const [filter] = process.argv.slice(2)
 
+console.log(`Database: ${location}\n`)
+
 const users = filter
-  ? raw().prepare<[string], UserRow>('SELECT * FROM users WHERE email = ?').all(filter)
-  : raw().prepare<[], UserRow>('SELECT * FROM users ORDER BY id').all()
+  ? await query<UserRow>('SELECT * FROM users WHERE email = ?', [filter])
+  : await query<UserRow>('SELECT * FROM users ORDER BY id')
 
 if (users.length === 0) {
   console.log(filter ? `No account for ${filter}.` : 'No accounts yet.')
@@ -30,7 +32,7 @@ console.table(
 )
 
 if (filter) {
-  const events = recentLoginEvents(users[0].id, 20)
+  const events = await recentLoginEvents(users[0].id, 20)
   console.log(`\nRecent sign-in activity for ${users[0].email}:`)
   console.table(
     events.map((e) => ({ at: e.created_at, stage: e.stage, outcome: e.outcome, ip: e.ip ?? '—', detail: e.detail ?? '' }))

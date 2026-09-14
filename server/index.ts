@@ -37,11 +37,38 @@ import { originAllowed, safeReturnUrl } from './origins.js'
 import { initRunStore, listRuns, getRun, deleteRun } from './agent/store.js'
 import * as db from './db.js'
 import { recall, recallBlock, searchRuns } from './agent/memory.js'
+import { resolveInside, workspaceFor } from './agent/workspace.js'
 import type { WSMessage, Task } from './types.js'
 
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+// Express 4 ignores a rejected promise from an async handler: the request hangs
+// and Node treats it as an unhandled rejection. With the database a network hop
+// away, any route can reject, so every handler's promise is routed to the error
+// handler at the bottom of this file instead.
+for (const method of ['get', 'post', 'patch', 'delete'] as const) {
+  const register = app[method].bind(app) as (...args: unknown[]) => unknown
+  ;(app as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
+    // app.get('setting') with one argument is a settings read, not a route.
+    if (args.length < 2) return register(...args)
+    return register(
+      ...args.map((arg) =>
+        typeof arg === 'function' && arg.length < 4
+          ? (req: express.Request, res: express.Response, next: express.NextFunction) => {
+              try {
+                const out = arg(req, res, next)
+                if (out instanceof Promise) out.catch(next)
+              } catch (err) {
+                next(err)
+              }
+            }
+          : arg
+      )
+    )
+  }
+}
 
 const httpServer = createServer(app)
 const wss = new WebSocketServer({ server: httpServer })
@@ -51,16 +78,23 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' })
 })
 
-// Download files the writer agent saved to agent_workspace, so the chat can
-// offer them as download chips. Same path confinement as the write_file tool.
-app.get('/files/*', (req, res) => {
+// Download files the agents saved during a run. Each account has its own
+// workspace, so the session decides which directory the path is resolved in —
+// a path from someone else's run simply isn't there.
+app.get('/files/*', async (req, res) => {
+  const header = req.headers.authorization
+  const user = await emailForToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined)
+  if (!user) {
+    res.status(401).json({ error: 'Sign in to download files.' })
+    return
+  }
   const rel = decodeURIComponent((req.params as Record<string, string>)[0] ?? '')
-  const base = path.resolve('./agent_workspace')
-  const safe = path.resolve(base, rel.replace(/^[/\\]+/, ''))
-  if (safe === base || !safe.startsWith(base + path.sep)) {
+  const safe = resolveInside(workspaceFor(user), rel)
+  if (!safe) {
     res.status(400).json({ error: 'Invalid path' })
     return
   }
+  res.setHeader('X-Content-Type-Options', 'nosniff')
   res.download(safe, path.basename(safe), (err) => {
     if (err && !res.headersSent) res.status(404).json({ error: 'File not found' })
   })
@@ -121,20 +155,20 @@ app.post('/auth/resend-otp', authLimiter, async (req, res) => {
 })
 
 // Layer 1 — the code emailed to the account address.
-app.post('/auth/verify-email-otp', authLimiter, (req, res) => {
+app.post('/auth/verify-email-otp', authLimiter, async (req, res) => {
   try {
     const { challengeId, code } = req.body ?? {}
-    res.json(verifyEmailOtp(challengeId, code, ctx(req)))
+    res.json(await verifyEmailOtp(challengeId, code, ctx(req)))
   } catch (err) {
     authFail(res, err)
   }
 })
 
 // Layer 2 — the authenticator app (or a one-time recovery code).
-app.post('/auth/verify-totp', authLimiter, (req, res) => {
+app.post('/auth/verify-totp', authLimiter, async (req, res) => {
   try {
     const { challengeId, code } = req.body ?? {}
-    res.json(verifyTotpFactor(challengeId, code, ctx(req)))
+    res.json(await verifyTotpFactor(challengeId, code, ctx(req)))
   } catch (err) {
     authFail(res, err)
   }
@@ -148,10 +182,10 @@ app.get('/auth/config', (_req, res) => {
   res.json({ google: isGoogleEnabled() })
 })
 
-app.get('/auth/google', authLimiter, (req, res) => {
+app.get('/auth/google', authLimiter, async (req, res) => {
   try {
     const returnUrl = typeof req.query.redirect === 'string' ? req.query.redirect : undefined
-    res.redirect(beginGoogleSignIn(returnUrl))
+    res.redirect(await beginGoogleSignIn(returnUrl))
   } catch (err) {
     authFail(res, err)
   }
@@ -173,17 +207,17 @@ app.get('/auth/google/callback', async (req, res) => {
   }
 })
 
-app.post('/auth/handoff', authLimiter, (req, res) => {
+app.post('/auth/handoff', authLimiter, async (req, res) => {
   try {
-    res.json(redeemHandoff((req.body ?? {}).code))
+    res.json(await redeemHandoff((req.body ?? {}).code))
   } catch (err) {
     authFail(res, err)
   }
 })
 
 // ── Authenticator enrolment — all require a live session ─────────────────────
-function requireUser(req: express.Request, res: express.Response): string | null {
-  const email = userFromRequest(req)
+async function requireUser(req: express.Request, res: express.Response): Promise<string | null> {
+  const email = await userFromRequest(req)
   if (!email) {
     res.status(401).json({ error: 'Sign in first.' })
     return null
@@ -191,21 +225,21 @@ function requireUser(req: express.Request, res: express.Response): string | null
   return email
 }
 
-app.get('/auth/me', (req, res) => {
-  const email = requireUser(req, res)
+app.get('/auth/me', async (req, res) => {
+  const email = await requireUser(req, res)
   if (!email) return
   try {
-    res.json(accountStatus(email))
+    res.json(await accountStatus(email))
   } catch (err) {
     authFail(res, err, 404)
   }
 })
 
 app.post('/auth/totp/setup', async (req, res) => {
-  const email = requireUser(req, res)
+  const email = await requireUser(req, res)
   if (!email) return
   try {
-    const setup = startTotpEnrollment(email)
+    const setup = await startTotpEnrollment(email)
     // Data-URL QR so the modal can render it without a QR library on the client.
     const qrDataUrl = await QRCode.toDataURL(setup.otpauthUrl, { margin: 1, width: 240 })
     res.json({ ...setup, qrDataUrl })
@@ -214,29 +248,29 @@ app.post('/auth/totp/setup', async (req, res) => {
   }
 })
 
-app.post('/auth/totp/enable', authLimiter, (req, res) => {
-  const email = requireUser(req, res)
+app.post('/auth/totp/enable', authLimiter, async (req, res) => {
+  const email = await requireUser(req, res)
   if (!email) return
   try {
-    res.json(confirmTotpEnrollment(email, (req.body ?? {}).code, ctx(req)))
+    res.json(await confirmTotpEnrollment(email, (req.body ?? {}).code, ctx(req)))
   } catch (err) {
     authFail(res, err)
   }
 })
 
-app.post('/auth/totp/disable', authLimiter, (req, res) => {
-  const email = requireUser(req, res)
+app.post('/auth/totp/disable', authLimiter, async (req, res) => {
+  const email = await requireUser(req, res)
   if (!email) return
   try {
-    res.json(disableTotp(email, (req.body ?? {}).password, ctx(req)))
+    res.json(await disableTotp(email, (req.body ?? {}).password, ctx(req)))
   } catch (err) {
     authFail(res, err)
   }
 })
 
-app.post('/auth/logout', (req, res) => {
+app.post('/auth/logout', async (req, res) => {
   const header = req.headers.authorization
-  revokeToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined)
+  await revokeToken(header?.startsWith('Bearer ') ? header.slice(7) : undefined)
   res.json({ ok: true })
 })
 
@@ -249,7 +283,7 @@ app.post('/auth/logout', (req, res) => {
 const documentUpload = express.raw({ type: '*/*', limit: '8mb' })
 
 app.post('/documents', documentUpload, async (req, res) => {
-  const owner = ownerRow(req, res)
+  const owner = await ownerRow(req, res)
   if (!owner) return
 
   const filename = String(req.query.name ?? 'document.txt').replace(/[^\w.\- ]/g, '_')
@@ -258,7 +292,7 @@ app.post('/documents', documentUpload, async (req, res) => {
     res.status(400).json({ error: 'That upload was empty.' })
     return
   }
-  if (db.countDocuments(owner.id) >= 25) {
+  if ((await db.countDocuments(owner.id)) >= 25) {
     res.status(400).json({ error: 'That is as many documents as one account can hold (25).' })
     return
   }
@@ -270,12 +304,12 @@ app.post('/documents', documentUpload, async (req, res) => {
   }
 })
 
-app.get('/documents', (req, res) => {
-  const owner = ownerRow(req, res)
+app.get('/documents', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
   res.json({
     maxChars: MAX_DOC_CHARS,
-    documents: db.listDocuments(owner.id).map((d) => ({
+    documents: (await db.listDocuments(owner.id)).map((d) => ({
       id: d.id,
       name: d.name,
       kind: d.kind,
@@ -287,16 +321,16 @@ app.get('/documents', (req, res) => {
   })
 })
 
-app.delete('/documents/:id', (req, res) => {
-  const owner = ownerRow(req, res)
+app.delete('/documents/:id', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
-  const ok = db.deleteDocument(Number(req.params.id), owner.id)
+  const ok = await db.deleteDocument(Number(req.params.id), owner.id)
   res.status(ok ? 200 : 404).json(ok ? { ok } : { error: 'Document not found.' })
 })
 
 /** Search your own documents — also useful on its own, not just inside a run. */
 app.post('/documents/search', async (req, res) => {
-  const owner = ownerRow(req, res)
+  const owner = await ownerRow(req, res)
   if (!owner) return
   const query = String((req.body ?? {}).query ?? '').trim()
   if (!query) {
@@ -316,31 +350,31 @@ app.post('/documents/search', async (req, res) => {
 // /calendar/events writes the ones the customer confirmed. Nothing reaches a
 // real calendar without that second, explicit call.
 
-app.get('/calendar/connect', authLimiter, (req, res) => {
+app.get('/calendar/connect', authLimiter, async (req, res) => {
   // The session token rides in the query because this is a top-level browser
   // navigation, not a fetch — it is exchanged for the account immediately.
-  if (!userFromRequest(req)) {
+  if (!(await userFromRequest(req))) {
     res.status(401).json({ error: 'Sign in first.' })
     return
   }
   try {
     const returnUrl = typeof req.query.redirect === 'string' ? req.query.redirect : undefined
-    res.redirect(beginCalendarConnect(returnUrl))
+    res.redirect(await beginCalendarConnect(returnUrl))
   } catch (err) {
     authFail(res, err)
   }
 })
 
-app.post('/calendar/disconnect', (req, res) => {
-  const owner = ownerRow(req, res)
+app.post('/calendar/disconnect', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
-  db.revokeCalendarGrant(owner.id)
+  await db.revokeCalendarGrant(owner.id)
   res.json({ calendarConnected: false })
 })
 
 /** Propose events from a run's answer. Read-only: writes nothing anywhere. */
 app.post('/calendar/extract', async (req, res) => {
-  const owner = ownerRow(req, res)
+  const owner = await ownerRow(req, res)
   if (!owner) return
   const body = (req.body ?? {}) as { runId?: string; text?: string; today?: string; timeZone?: string }
 
@@ -377,7 +411,7 @@ app.post('/calendar/extract', async (req, res) => {
 
 /** Write the confirmed events. Only ever called after the customer reviews them. */
 app.post('/calendar/events', async (req, res) => {
-  const owner = ownerRow(req, res)
+  const owner = await ownerRow(req, res)
   if (!owner) return
   if (!owner.google_refresh_token) {
     res.status(400).json({ error: 'Connect your Google Calendar first.' })
@@ -404,7 +438,7 @@ app.post('/calendar/events', async (req, res) => {
         failed.push({ title: event.title, error: err instanceof Error ? err.message : String(err) })
       }
     }
-    db.recordLoginEvent({
+    await db.recordLoginEvent({
       userId: owner.id,
       email: owner.email,
       ip: req.ip ?? null,
@@ -423,11 +457,11 @@ app.post('/calendar/events', async (req, res) => {
 
 const CADENCES = ['daily', 'weekdays', 'weekly'] as const
 
-app.get('/schedules', (req, res) => {
-  const owner = ownerRow(req, res)
+app.get('/schedules', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
   res.json({
-    schedules: db.listSchedules(owner.id).map((s) => ({
+    schedules: (await db.listSchedules(owner.id)).map((s) => ({
       id: s.id,
       title: s.title,
       goal: s.goal,
@@ -447,8 +481,8 @@ app.get('/schedules', (req, res) => {
   })
 })
 
-app.post('/schedules', (req, res) => {
-  const owner = ownerRow(req, res)
+app.post('/schedules', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
   const b = (req.body ?? {}) as Record<string, unknown>
   const goal = String(b.goal ?? '').trim()
@@ -469,12 +503,12 @@ app.post('/schedules', (req, res) => {
     return
   }
   // Cap it: each schedule spends the account's model quota unattended.
-  if (db.listSchedules(owner.id).length >= 10) {
+  if ((await db.listSchedules(owner.id)).length >= 10) {
     res.status(400).json({ error: 'That is as many schedules as one account can have (10).' })
     return
   }
 
-  const schedule = db.createSchedule({
+  const schedule = await db.createSchedule({
     userId: owner.id,
     title: String(b.title ?? '').trim() || goal.slice(0, 60),
     goal,
@@ -489,25 +523,25 @@ app.post('/schedules', (req, res) => {
   res.json({ id: schedule.id })
 })
 
-app.patch('/schedules/:id', (req, res) => {
-  const owner = ownerRow(req, res)
+app.patch('/schedules/:id', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
-  const ok = db.setScheduleEnabled(Number(req.params.id), owner.id, (req.body ?? {}).enabled !== false)
+  const ok = await db.setScheduleEnabled(Number(req.params.id), owner.id, (req.body ?? {}).enabled !== false)
   res.status(ok ? 200 : 404).json(ok ? { ok } : { error: 'Schedule not found.' })
 })
 
-app.delete('/schedules/:id', (req, res) => {
-  const owner = ownerRow(req, res)
+app.delete('/schedules/:id', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
-  const ok = db.deleteSchedule(Number(req.params.id), owner.id)
+  const ok = await db.deleteSchedule(Number(req.params.id), owner.id)
   res.status(ok ? 200 : 404).json(ok ? { ok } : { error: 'Schedule not found.' })
 })
 
 /** Run one now, ignoring the clock. */
 app.post('/schedules/:id/run', async (req, res) => {
-  const owner = ownerRow(req, res)
+  const owner = await ownerRow(req, res)
   if (!owner) return
-  const schedule = db.findSchedule(Number(req.params.id))
+  const schedule = await db.findSchedule(Number(req.params.id))
   if (!schedule || schedule.user_id !== owner.id) {
     res.status(404).json({ error: 'Schedule not found.' })
     return
@@ -533,9 +567,9 @@ app.post('/schedules/tick', async (req, res) => {
 // A share link is a capability: anyone holding it can read that one run. It
 // carries no session, grants nothing else, and dies when the owner revokes it.
 
-function ownerRow(req: express.Request, res: express.Response): db.UserRow | null {
-  const email = userFromRequest(req)
-  const user = email ? db.findUser(email) : undefined
+async function ownerRow(req: express.Request, res: express.Response): Promise<db.UserRow | null> {
+  const email = await userFromRequest(req)
+  const user = email ? await db.findUser(email) : undefined
   if (!user) {
     res.status(401).json({ error: 'Sign in first.' })
     return null
@@ -544,8 +578,8 @@ function ownerRow(req: express.Request, res: express.Response): db.UserRow | nul
 }
 
 /** Publish a run. Idempotent: re-sharing returns the existing link. */
-app.post('/runs/:id/share', (req, res) => {
-  const owner = ownerRow(req, res)
+app.post('/runs/:id/share', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
   // getRun scopes by owner, so this cannot publish someone else's run.
   const run = getRun(req.params.id, owner.email)
@@ -553,8 +587,8 @@ app.post('/runs/:id/share', (req, res) => {
     res.status(404).json({ error: 'Run not found.' })
     return
   }
-  const existing = db.findShareByRun(run.id)
-  const share = db.createShare({
+  const existing = await db.findShareByRun(run.id)
+  const share = await db.createShare({
     token: existing?.token ?? crypto.randomBytes(12).toString('base64url'),
     runId: run.id,
     ownerId: owner.id,
@@ -569,18 +603,18 @@ app.post('/runs/:id/share', (req, res) => {
   })
 })
 
-app.delete('/runs/:id/share', (req, res) => {
-  const owner = ownerRow(req, res)
+app.delete('/runs/:id/share', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
-  res.json({ revoked: db.deleteShare(req.params.id, owner.id) })
+  res.json({ revoked: await db.deleteShare(req.params.id, owner.id) })
 })
 
 /** Every run this account has published, for the history panel. */
-app.get('/shares', (req, res) => {
-  const owner = ownerRow(req, res)
+app.get('/shares', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
   res.json({
-    shares: db.listSharesForOwner(owner.id).map((s) => ({
+    shares: (await db.listSharesForOwner(owner.id)).map((s) => ({
       runId: s.run_id,
       token: s.token,
       title: s.title,
@@ -597,17 +631,17 @@ app.get('/shares', (req, res) => {
  * it. Never the owner's email, never the file list, never anything about the
  * account.
  */
-app.get('/shared/:token', (req, res) => {
+app.get('/shared/:token', async (req, res) => {
   // The viewer is anonymous, so the run is fetched as the owner recorded on
   // the share row — the link itself is the authorisation.
-  const share = db.findShare(req.params.token)
-  const owner = share ? db.findUserById(share.owner_id) : undefined
+  const share = await db.findShare(req.params.token)
+  const owner = share ? await db.findUserById(share.owner_id) : undefined
   const run = share && owner ? getRun(share.run_id, owner.email) : null
   if (!share || !run) {
     res.status(404).json({ error: 'This link is no longer available.' })
     return
   }
-  db.countShareView(share.token)
+  await db.countShareView(share.token)
   res.json({
     title: run.title,
     goal: run.goal,
@@ -621,7 +655,7 @@ app.get('/shared/:token', (req, res) => {
       status: t.status,
     })),
     allowComments: Boolean(share.allow_comments),
-    comments: db.listComments(share.token).map((c) => ({
+    comments: (await db.listComments(share.token)).map((c) => ({
       id: c.id,
       author: c.author,
       body: c.body,
@@ -631,8 +665,8 @@ app.get('/shared/:token', (req, res) => {
   })
 })
 
-app.post('/shared/:token/comments', authLimiter, (req, res) => {
-  const share = db.findShare(req.params.token)
+app.post('/shared/:token/comments', authLimiter, async (req, res) => {
+  const share = await db.findShare(req.params.token)
   if (!share) {
     res.status(404).json({ error: 'This link is no longer available.' })
     return
@@ -648,14 +682,14 @@ app.post('/shared/:token/comments', authLimiter, (req, res) => {
   }
   // A signed-in commenter is labelled with their real account name; everyone
   // else picks a display name, which is shown unverified.
-  const email = userFromRequest(req)
-  const account = email ? db.findUser(email) : undefined
+  const email = await userFromRequest(req)
+  const account = email ? await db.findUser(email) : undefined
   const author = account?.name ?? String((req.body ?? {}).author ?? '').trim().slice(0, 40)
   if (!author) {
     res.status(400).json({ error: 'Add your name so the owner knows who commented.' })
     return
   }
-  const comment = db.addComment({
+  const comment = await db.addComment({
     token: share.token,
     author,
     userId: account?.id ?? null,
@@ -670,24 +704,24 @@ app.post('/shared/:token/comments', authLimiter, (req, res) => {
   })
 })
 
-app.delete('/shared/comments/:id', (req, res) => {
-  const owner = ownerRow(req, res)
+app.delete('/shared/comments/:id', async (req, res) => {
+  const owner = await ownerRow(req, res)
   if (!owner) return
-  res.json({ deleted: db.deleteComment(Number(req.params.id), owner.id) })
+  res.json({ deleted: await db.deleteComment(Number(req.params.id), owner.id) })
 })
 
 // ── Run history ─────────────────────────────────────────────────────────────
 // History is per-account: a run is only ever listed or returned to the session
 // token that owns it. Signed-out sessions have no history at all.
-function userFromRequest(req: express.Request): string | null {
+function userFromRequest(req: express.Request): Promise<string | null> {
   const header = req.headers.authorization
   const bearer = header?.startsWith('Bearer ') ? header.slice(7) : undefined
   const query = typeof req.query.token === 'string' ? req.query.token : undefined
   return emailForToken(bearer ?? query)
 }
 
-app.get('/runs', (req, res) => {
-  const user = userFromRequest(req)
+app.get('/runs', async (req, res) => {
+  const user = await userFromRequest(req)
   if (!user) {
     res.status(401).json({ error: 'Sign in to see your run history.' })
     return
@@ -711,8 +745,8 @@ app.get('/runs', (req, res) => {
   res.json({ runs: listRuns(user, 50) })
 })
 
-app.get('/runs/:id', (req, res) => {
-  const user = userFromRequest(req)
+app.get('/runs/:id', async (req, res) => {
+  const user = await userFromRequest(req)
   if (!user) {
     res.status(401).json({ error: 'Sign in to see your run history.' })
     return
@@ -726,7 +760,7 @@ app.get('/runs/:id', (req, res) => {
 })
 
 app.delete('/runs/:id', async (req, res) => {
-  const user = userFromRequest(req)
+  const user = await userFromRequest(req)
   if (!user) {
     res.status(401).json({ error: 'Sign in to manage your run history.' })
     return
@@ -796,7 +830,7 @@ wss.on('connection', (ws: WebSocket, req) => {
       })
     }
 
-    const account = db.findUser(user)
+    const account = await db.findUser(user)
     if (!account) return
     try {
       const passages = await retrieve(account.id, goal)
@@ -853,7 +887,15 @@ wss.on('connection', (ws: WebSocket, req) => {
     }
 
     // A token may arrive on any message; the chat client sends it with `start`.
-    if (data.token) user = emailForToken(data.token)
+    if (data.token) {
+      try {
+        user = await emailForToken(data.token)
+      } catch (err) {
+        console.error('[ws] session lookup failed:', err)
+        send({ type: 'agent_error', payload: 'Could not check your sign-in right now. Please try again.' })
+        return
+      }
+    }
 
     // Cancel is handled BEFORE the busy guard — stopping a run in flight is
     // the entire point of it, and a run in flight is exactly when busy is set.
@@ -955,10 +997,20 @@ wss.on('connection', (ws: WebSocket, req) => {
   })
 })
 
+// Last stop for anything a route didn't handle itself — most often the database
+// being unreachable. The detail goes to the log; the customer gets a sentence.
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[http]', err)
+  if (!res.headersSent) res.status(500).json({ error: 'Something went wrong on our side. Please try again.' })
+})
+
 const PORT = process.env.PORT ?? 4000
 httpServer.listen(PORT, () => {
   console.log(`\n🚀 Agent server running on http://localhost:${PORT}`)
   console.log(`   WebSocket ready on ws://localhost:${PORT}\n`)
+  void db.dbReady().catch((err) => {
+    console.error(`🗄️  DATABASE UNREACHABLE (${db.location}) — sign-in and history will fail.\n   ${err instanceof Error ? err.message : err}`)
+  })
   void verifyLLMKey()
   void initRunStore()
   // Recurring runs. Needs a process that stays alive; on serverless nothing
